@@ -188,6 +188,14 @@ elif [ "${remote}" = true ] && [ "${remote_mode}" = ssh ] ; then
   test_args='--dns-domain="'${KUBE_DNS_DOMAIN:-cluster.local}'" '${test_args}
   test_args='--kubelet-flags="--cluster-domain='${KUBE_DNS_DOMAIN:-cluster.local}'" '${test_args}
 
+  # Output the configuration we will try to run
+  echo "Running tests remotely using"
+  echo "Hosts: ${hosts}"
+  echo "Ginkgo Flags: ${ginkgoflags}"
+  echo "Instance Metadata: ${metadata}"
+  echo "Image Config File: ${image_config_file}"
+  echo "Kubelet Config File: ${kubelet_config_file}"
+
   # Invoke the runner
   go run test/e2e_node/runner/remote/run_remote.go  --mode="ssh" --vmodule=*=4 \
     --hosts="${hosts}" --results-dir="${artifacts}" --ginkgo-flags="${ginkgoflags}" \

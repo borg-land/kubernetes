@@ -917,6 +917,32 @@ func createAWSInstance(img internalAWSImage) (*awsInstance, error) {
 		},
 		UserData: aws.String(base64.StdEncoding.EncodeToString([]byte(`#!/bin/bash
 
+# install a CNI
+cat << __ECNI__ > /etc/cni/net.d/10-testcni.conflist
+{
+  "cniVersion": "0.3.1",
+  "name": "testcni",
+  "plugins": [
+    {
+      "name": "testnet",
+      "type": "bridge",
+      "bridge": "cni0",
+      "isGateway": true,
+      "ipMasq": true,
+      "ipam": {
+        "type": "host-local",
+        "subnet": "10.22.0.0/16",
+        "routes": [
+          {
+            "dst": "0.0.0.0/0"
+          }
+        ]
+      }
+    }
+  ]
+}
+__ECNI__
+
 # rewrite the pause image url
 perl -pi -e 's#602401143452.dkr.ecr.us-west-2.amazonaws.com/eks/pause:3.5#public.ecr.aws/eks-distro/kubernetes/pause:3.2#' /etc/containerd/config.toml
 

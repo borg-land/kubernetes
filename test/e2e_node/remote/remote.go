@@ -120,7 +120,7 @@ func RunRemote(suite TestSuite, archive string, host string, cleanup bool, image
 	}
 
 	// Copy the archive to the staging directory
-	if output, err := runSSHCommand("scp", archive, fmt.Sprintf("%s:%s/", GetHostnameOrIP(host), workspace)); err != nil {
+	if output, err := runSSHCommand(host, "scp", archive, fmt.Sprintf("%s:%s/", GetHostnameOrIP(host), workspace)); err != nil {
 		// Exit failure with the error
 		return "", false, fmt.Errorf("failed to copy test archive: %v, output: %q", err, output)
 	}
@@ -199,18 +199,18 @@ func getTestArtifacts(host, testDir string) error {
 		return fmt.Errorf("failed to create log directory %q: %w", logPath, err)
 	}
 	// Copy logs to artifacts/hostname
-	if _, err := runSSHCommand("scp", "-r", fmt.Sprintf("%s:%s/results/*.log", GetHostnameOrIP(host), testDir), logPath); err != nil {
+	if _, err := runSSHCommand(host, "scp", "-r", fmt.Sprintf("%s:%s/results/*.log", GetHostnameOrIP(host), testDir), logPath); err != nil {
 		return err
 	}
 	// Copy json files (if any) to artifacts.
 	if _, err := SSH(host, "ls", fmt.Sprintf("%s/results/*.json", testDir)); err == nil {
-		if _, err = runSSHCommand("scp", "-r", fmt.Sprintf("%s:%s/results/*.json", GetHostnameOrIP(host), testDir), *resultsDir); err != nil {
+		if _, err = runSSHCommand(host, "scp", "-r", fmt.Sprintf("%s:%s/results/*.json", GetHostnameOrIP(host), testDir), *resultsDir); err != nil {
 			return err
 		}
 	}
 	if _, err := SSH(host, "ls", fmt.Sprintf("%s/results/junit*", testDir)); err == nil {
 		// Copy junit (if any) to the top of artifacts
-		if _, err = runSSHCommand("scp", fmt.Sprintf("%s:%s/results/junit*", GetHostnameOrIP(host), testDir), *resultsDir); err != nil {
+		if _, err = runSSHCommand(host, "scp", fmt.Sprintf("%s:%s/results/junit*", GetHostnameOrIP(host), testDir), *resultsDir); err != nil {
 			return err
 		}
 	}
@@ -236,7 +236,7 @@ func collectSystemLog(host string) {
 	// it could've be been removed if the node was rebooted.
 	if output, err := SSH(host, "sh", "-c", fmt.Sprintf("'journalctl --system --all > %s'", logPath)); err == nil {
 		klog.V(2).Infof("Got the system logs from journald; copying it back...")
-		if output, err := runSSHCommand("scp", fmt.Sprintf("%s:%s", GetHostnameOrIP(host), logPath), destPath); err != nil {
+		if output, err := runSSHCommand(host, "scp", fmt.Sprintf("%s:%s", GetHostnameOrIP(host), logPath), destPath); err != nil {
 			klog.V(2).Infof("Failed to copy the log: err: %v, output: %q", err, output)
 		}
 	} else {

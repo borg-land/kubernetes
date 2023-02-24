@@ -29,7 +29,7 @@ import (
 )
 
 var sshOptions = flag.String("ssh-options", "", "Commandline options passed to ssh.")
-var sshEnv = flag.String("ssh-env", "", "Use predefined ssh options for environment.  Options: gce")
+var sshEnv = flag.String("ssh-env", "", "Use predefined ssh options for environment.  Options: gce or aws")
 var sshKey = flag.String("ssh-key", "", "Path to ssh private key.")
 var sshUser = flag.String("ssh-user", "", "Use predefined user for ssh.")
 
@@ -43,6 +43,7 @@ func init() {
 	}
 	sshOptionsMap = map[string]string{
 		"gce": "-o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o CheckHostIP=no -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o LogLevel=ERROR",
+		"aws": "-o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o CheckHostIP=no -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o LogLevel=ERROR",
 	}
 	defaultGceKey := os.Getenv("GCE_SSH_PRIVATE_KEY_FILE")
 	if defaultGceKey == "" {
@@ -63,6 +64,18 @@ func AddHostnameIP(hostname, ip string) {
 	hostnameIPOverrides.Lock()
 	defer hostnameIPOverrides.Unlock()
 	hostnameIPOverrides.m[hostname] = ip
+}
+
+var sshKeyOverrides = struct {
+	sync.RWMutex
+	m map[string]string
+}{m: make(map[string]string)}
+
+// AddSSHKey adds a <hosrtname,path to SSH private key> pair into the sshKeyOverrides map
+func AddSSHKey(hostname, keyFilePath string) {
+	sshKeyOverrides.Lock()
+	defer sshKeyOverrides.Unlock()
+	sshKeyOverrides.m[hostname] = keyFilePath
 }
 
 // GetHostnameOrIP converts hostname into ip and apply user if necessary.
@@ -92,18 +105,18 @@ func getSSHCommand(sep string, args ...string) string {
 // SSH executes ssh command with runSSHCommand as root. The `sudo` makes sure that all commands
 // are executed by root, so that there won't be permission mismatch between different commands.
 func SSH(host string, cmd ...string) (string, error) {
-	return runSSHCommand("ssh", append([]string{GetHostnameOrIP(host), "--", "sudo"}, cmd...)...)
+	return runSSHCommand(host, "ssh", append([]string{GetHostnameOrIP(host), "--", "sudo"}, cmd...)...)
 }
 
 // SSHNoSudo executes ssh command with runSSHCommand as normal user. Sometimes we need this,
 // for example creating a directory that we'll copy files there with scp.
 func SSHNoSudo(host string, cmd ...string) (string, error) {
-	return runSSHCommand("ssh", append([]string{GetHostnameOrIP(host), "--"}, cmd...)...)
+	return runSSHCommand(host, "ssh", append([]string{GetHostnameOrIP(host), "--"}, cmd...)...)
 }
 
 // runSSHCommand executes the ssh or scp command, adding the flag provided --ssh-options
-func runSSHCommand(cmd string, args ...string) (string, error) {
-	if key, err := getPrivateSSHKey(); len(key) != 0 {
+func runSSHCommand(host, cmd string, args ...string) (string, error) {
+	if key, err := getPrivateSSHKey(host); len(key) != 0 {
 		if err != nil {
 			klog.Errorf("private SSH key (%s) not found. Check if the SSH key is configured properly:, err: %v", key, err)
 			return "", fmt.Errorf("private SSH key (%s) does not exist", key)
@@ -127,13 +140,19 @@ func runSSHCommand(cmd string, args ...string) (string, error) {
 }
 
 // getPrivateSSHKey returns the path to ssh private key
-func getPrivateSSHKey() (string, error) {
+func getPrivateSSHKey(host string) (string, error) {
 	if *sshKey != "" {
 		if _, err := os.Stat(*sshKey); err != nil {
 			return *sshKey, err
 		}
 
 		return *sshKey, nil
+	}
+
+	sshKeyOverrides.Lock()
+	defer sshKeyOverrides.Unlock()
+	if key, ok := sshKeyOverrides.m[host]; ok {
+		return key, nil
 	}
 
 	if key, found := sshDefaultKeyMap[*sshEnv]; found {

@@ -22,7 +22,11 @@ package main
 
 import (
 	"context"
+	crand "crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -37,7 +41,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/ec2instanceconnect"
+	"golang.org/x/crypto/ssh"
 	"k8s.io/apimachinery/pkg/util/wait"
+
 	"k8s.io/kubernetes/test/e2e_node/remote"
 	"k8s.io/kubernetes/test/e2e_node/system"
 
@@ -49,11 +59,11 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-var mode = flag.String("mode", "gce", "Mode to operate in. One of gce|ssh. Defaults to gce")
+var mode = flag.String("mode", "gce", "Mode to operate in. One of gce|aws|ssh. Defaults to gce")
 var testArgs = flag.String("test_args", "", "Space-separated list of arguments to pass to Ginkgo test runner.")
 var testSuite = flag.String("test-suite", "default", "Test suite the runner initializes with. Currently support default|cadvisor|conformance")
 var instanceNamePrefix = flag.String("instance-name-prefix", "", "prefix for instance names")
-var zone = flag.String("zone", "", "gce zone the hosts live in")
+var zone = flag.String("zone", "", "gce zone or AWS region that the hosts live in")
 var project = flag.String("project", "", "gce project the hosts live in")
 var imageConfigFile = flag.String("image-config-file", "", "yaml file describing images to run")
 var imageConfigDir = flag.String("image-config-dir", "", "(optional)path to image config files")
@@ -100,14 +110,19 @@ func init() {
 }
 
 const (
-	defaultMachine                = "n1-standard-1"
+	defaultGCEMachine = "n1-standard-1"
+	//defaultAWSInstanceType        = "t3a.medium"
+	// TODO: fix this
+	defaultAWSInstanceType        = "c6a.xlarge"
 	acceleratorTypeResourceFormat = "https://www.googleapis.com/compute/beta/projects/%s/zones/%s/acceleratorTypes/%s"
 )
 
 var (
-	computeService *compute.Service
-	arc            Archive
-	suite          remote.TestSuite
+	gceComputeService *compute.Service
+	awsEC2Service     *ec2.EC2
+	awsEC2ICService   *ec2instanceconnect.EC2InstanceConnect
+	arc               Archive
+	suite             remote.TestSuite
 )
 
 // Archive contains path info in the archive.
@@ -170,7 +185,7 @@ type GCEImage struct {
 	Tests []string `json:"tests,omitempty"`
 }
 
-type internalImageConfig struct {
+type internalGCEImageConfig struct {
 	images map[string]internalGCEImage
 }
 
@@ -186,6 +201,12 @@ type internalGCEImage struct {
 	metadata        *compute.Metadata
 	machine         string
 	tests           []string
+}
+
+type internalAWSImage struct {
+	amiID string
+	// The instance type (e.g. t3a.medium)
+	instanceType string
 }
 
 func main() {
@@ -225,21 +246,37 @@ func main() {
 		return
 	}
 
-	var gceImages *internalImageConfig
+	var gceImages *internalGCEImageConfig
+	var internalAWSImage []internalAWSImage
+	if *mode == "gce" || *mode == "aws" {
+		if *instanceNamePrefix == "" {
+			*instanceNamePrefix = "tmp-node-e2e-" + uuid.New().String()[:8]
+		}
+	}
 	if *mode == "gce" {
 		if *hosts == "" && *imageConfigFile == "" && *images == "" {
 			klog.Fatalf("Must specify one of --image-config-file, --hosts, --images.")
 		}
 		var err error
-		computeService, err = getComputeClient()
+		gceComputeService, err = getComputeClient()
 		if err != nil {
 			klog.Fatalf("Unable to create gcloud compute service using defaults.  Make sure you are authenticated. %v", err)
 		}
 		if gceImages, err = prepareGceImages(); err != nil {
 			klog.Fatalf("While preparing GCE images: %v", err)
 		}
-		if *instanceNamePrefix == "" {
-			*instanceNamePrefix = "tmp-node-e2e-" + uuid.New().String()[:8]
+	} else if *mode == "aws" {
+		if *hosts == "" && *images == "" {
+			klog.Fatalf("Must specify one of --hosts or --images.")
+		}
+		sess, err := session.NewSession(&aws.Config{Region: zone})
+		if err != nil {
+			klog.Fatalf("Unable to create AWS session, %s", err)
+		}
+		awsEC2Service = ec2.New(sess)
+		awsEC2ICService = ec2instanceconnect.New(sess)
+		if internalAWSImage, err = prepareAWSImages(); err != nil {
+			klog.Fatalf("While preparing AWS images: %v", err)
 		}
 	}
 
@@ -264,10 +301,19 @@ func main() {
 			fmt.Printf("Initializing e2e tests using image %s/%s/%s.\n", shortName, imageConfig.project, imageConfig.image)
 			running++
 			go func(image *internalGCEImage, junitFileName string) {
-				results <- testImage(image, junitFileName)
+				results <- testGCEImage(image, junitFileName)
 			}(&imageConfig, shortName)
 		}
 	}
+	for i := range internalAWSImage {
+		img := internalAWSImage[i]
+		fmt.Printf("Initializing e2e tests using image %s.\n", img.amiID)
+		running++
+		go func() {
+			results <- testAWSImage(img)
+		}()
+	}
+
 	if *hosts != "" {
 		for _, host := range strings.Split(*hosts, ",") {
 			fmt.Printf("Initializing e2e tests using host %s.\n", host)
@@ -312,8 +358,78 @@ func main() {
 	callGubernator(*gubernator)
 }
 
-func prepareGceImages() (*internalImageConfig, error) {
-	gceImages := &internalImageConfig{
+func testAWSImage(img internalAWSImage) *TestResult {
+	instance, err := createAWSInstance(img)
+	if *deleteInstances {
+		defer deleteAWSInstance(instance.instanceID)
+	}
+	if err != nil {
+		return &TestResult{
+			err: fmt.Errorf("unable to create EC2 instance for image %s.  %v", img.amiID, err),
+		}
+	}
+	deleteFiles := !*deleteInstances && *cleanup
+	junitFileName := "shortname"
+	ginkgoFlagsStr := *ginkgoFlags
+	imageDesc := "imagedesc"
+
+	// write our private SSH key to disk and register it
+	f, err := os.CreateTemp("", ".ssh-key-*")
+	if err != nil {
+		return &TestResult{
+			err: fmt.Errorf("creating SSH key, %w", err),
+		}
+	}
+	sshKeyFile := f.Name()
+	defer os.Remove(sshKeyFile)
+	if err = os.Chmod(sshKeyFile, 0400); err != nil {
+		return &TestResult{
+			err: fmt.Errorf("chmod'ing SSH key, %w", err),
+		}
+	}
+
+	if _, err = f.Write(instance.sshKey.private); err != nil {
+		return &TestResult{
+			err: fmt.Errorf("writing SSH key, %w", err),
+		}
+	}
+	klog.Infof("registering %s/%s and ssh key %s", instance.instanceID, instance.publicIP, sshKeyFile)
+	remote.AddHostnameIP(instance.instanceID, instance.publicIP)
+	remote.AddSSHKey(instance.instanceID, sshKeyFile)
+
+	result := testHost(instance.instanceID, deleteFiles, imageDesc, junitFileName, ginkgoFlagsStr)
+	return result
+}
+
+func deleteAWSInstance(instanceID string) {
+	klog.Infof("Terminating instance %q", instanceID)
+	_, err := awsEC2Service.TerminateInstances(&ec2.TerminateInstancesInput{
+		InstanceIds: []*string{&instanceID},
+	})
+	if err != nil {
+		klog.Errorf("Error terminating instance %q: %v", instanceID, err)
+	}
+}
+
+func prepareAWSImages() ([]internalAWSImage, error) {
+	var ret []internalAWSImage
+	if *images != "" {
+		cliImages := strings.Split(*images, ",")
+		for _, img := range cliImages {
+			if !strings.HasPrefix(img, "ami-") {
+				return nil, fmt.Errorf("invalid AMI id format for %q", img)
+			}
+			ret = append(ret, internalAWSImage{
+				amiID:        img,
+				instanceType: defaultAWSInstanceType,
+			})
+		}
+	}
+	return ret, nil
+}
+
+func prepareGceImages() (*internalGCEImageConfig, error) {
+	gceImages := &internalGCEImageConfig{
 		images: make(map[string]internalGCEImage),
 	}
 
@@ -452,7 +568,7 @@ func getImageMetadata(input string) *compute.Metadata {
 }
 
 func registerGceHostIP(host string) error {
-	instance, err := computeService.Instances.Get(*project, *zone, host).Do()
+	instance, err := gceComputeService.Instances.Get(*project, *zone, host).Do()
 	if err != nil {
 		return err
 	}
@@ -500,7 +616,7 @@ func (a byCreationTime) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func getGCEImage(imageRegex, imageFamily string, project string) (string, error) {
 	imageObjs := []imageObj{}
 	imageRe := regexp.MustCompile(imageRegex)
-	if err := computeService.Images.List(project).Pages(context.Background(),
+	if err := gceComputeService.Images.List(project).Pages(context.Background(),
 		func(ilc *compute.ImageList) error {
 			for _, instance := range ilc.Items {
 				if imageRegex != "" && !imageRe.MatchString(instance.Name) {
@@ -536,21 +652,21 @@ func getGCEImage(imageRegex, imageFamily string, project string) (string, error)
 
 // Provision a gce instance using image and run the tests in archive against the instance.
 // Delete the instance afterward.
-func testImage(imageConfig *internalGCEImage, junitFileName string) *TestResult {
+func testGCEImage(imageConfig *internalGCEImage, junitFileName string) *TestResult {
 	ginkgoFlagsStr := *ginkgoFlags
 	// Check whether the test is for benchmark.
 	if len(imageConfig.tests) > 0 {
 		// Benchmark needs machine type non-empty.
 		if imageConfig.machine == "" {
-			imageConfig.machine = defaultMachine
+			imageConfig.machine = defaultGCEMachine
 		}
 		// Use the Ginkgo focus in benchmark config.
 		ginkgoFlagsStr += (" " + testsToGinkgoFocus(imageConfig.tests))
 	}
 
-	host, err := createInstance(imageConfig)
+	host, err := createGCEInstance(imageConfig)
 	if *deleteInstances {
-		defer deleteInstance(host)
+		defer deleteGCEInstance(host)
 	}
 	if err != nil {
 		return &TestResult{
@@ -573,7 +689,7 @@ func testImage(imageConfig *internalGCEImage, junitFileName string) *TestResult 
 	result := testHost(host, deleteFiles, imageConfig.imageDesc, junitFileName, ginkgoFlagsStr)
 	// This is a temporary solution to collect serial node serial log. Only port 1 contains useful information.
 	// TODO(random-liu): Extract out and unify log collection logic with cluste e2e.
-	serialPortOutput, err := computeService.Instances.GetSerialPortOutput(*project, *zone, host).Port(1).Do()
+	serialPortOutput, err := gceComputeService.Instances.GetSerialPortOutput(*project, *zone, host).Port(1).Do()
 	if err != nil {
 		klog.Errorf("Failed to collect serial output from node %q: %v", host, err)
 	} else {
@@ -587,14 +703,14 @@ func testImage(imageConfig *internalGCEImage, junitFileName string) *TestResult 
 }
 
 // Provision a gce instance using image
-func createInstance(imageConfig *internalGCEImage) (string, error) {
-	p, err := computeService.Projects.Get(*project).Do()
+func createGCEInstance(imageConfig *internalGCEImage) (string, error) {
+	p, err := gceComputeService.Projects.Get(*project).Do()
 	if err != nil {
 		return "", fmt.Errorf("failed to get project info %q: %w", *project, err)
 	}
 	// Use default service account
 	serviceAccount := p.DefaultServiceAccount
-	klog.V(1).Infof("Creating instance %+v with service account %q", *imageConfig, serviceAccount)
+	klog.V(1).Infof("Creating instance %+v  with service account %q", *imageConfig, serviceAccount)
 	name := imageToInstanceName(imageConfig)
 	i := &compute.Instance{
 		Name:        name,
@@ -649,8 +765,8 @@ func createInstance(imageConfig *internalGCEImage) (string, error) {
 	i.Scheduling = &scheduling
 	i.Metadata = imageConfig.metadata
 	var insertionOperationName string
-	if _, err := computeService.Instances.Get(*project, *zone, i.Name).Do(); err != nil {
-		op, err := computeService.Instances.Insert(*project, *zone, i).Do()
+	if _, err := gceComputeService.Instances.Get(*project, *zone, i.Name).Do(); err != nil {
+		op, err := gceComputeService.Instances.Insert(*project, *zone, i).Do()
 
 		if err != nil {
 			ret := fmt.Sprintf("could not create instance %s: API error: %v", name, err)
@@ -675,7 +791,7 @@ func createInstance(imageConfig *internalGCEImage) (string, error) {
 			time.Sleep(time.Second * 20)
 		}
 		var insertionOperation *compute.Operation
-		insertionOperation, err = computeService.ZoneOperations.Get(*project, *zone, insertionOperationName).Do()
+		insertionOperation, err = gceComputeService.ZoneOperations.Get(*project, *zone, insertionOperationName).Do()
 		if err != nil {
 			continue
 		}
@@ -691,7 +807,7 @@ func createInstance(imageConfig *internalGCEImage) (string, error) {
 			return name, fmt.Errorf("could not create instance %s: %+v", name, errs)
 		}
 
-		instance, err = computeService.Instances.Get(*project, *zone, name).Do()
+		instance, err = gceComputeService.Instances.Get(*project, *zone, name).Do()
 		if err != nil {
 			continue
 		}
@@ -750,6 +866,215 @@ func createInstance(imageConfig *internalGCEImage) (string, error) {
 	return name, err
 }
 
+// Provision an AWS instance using the image
+type awsInstance struct {
+	instance   *ec2.Instance
+	instanceID string
+	sshKey     sshKey
+	publicIP   string
+}
+
+func createAWSInstance(img internalAWSImage) (*awsInstance, error) {
+	rsv, err := awsEC2Service.RunInstances(&ec2.RunInstancesInput{
+		InstanceType: &img.instanceType,
+		ImageId:      &img.amiID,
+		MinCount:     aws.Int64(1),
+		MaxCount:     aws.Int64(1),
+		NetworkInterfaces: []*ec2.InstanceNetworkInterfaceSpecification{
+			{
+				AssociatePublicIpAddress: aws.Bool(true),
+				DeviceIndex:              aws.Int64(0),
+			},
+		},
+		TagSpecifications: []*ec2.TagSpecification{
+			{
+				ResourceType: aws.String(ec2.ResourceTypeInstance),
+				Tags: []*ec2.Tag{
+					{
+						Key:   aws.String("Name"),
+						Value: instanceNamePrefix,
+					},
+				},
+			},
+			{
+				ResourceType: aws.String(ec2.ResourceTypeVolume),
+				Tags: []*ec2.Tag{
+					{
+						Key:   aws.String("Name"),
+						Value: instanceNamePrefix,
+					},
+				},
+			},
+		},
+		BlockDeviceMappings: []*ec2.BlockDeviceMapping{
+			{
+				DeviceName: aws.String("/dev/xvda"),
+				Ebs: &ec2.EbsBlockDevice{
+					VolumeSize: aws.Int64(20),
+					VolumeType: aws.String("gp3"),
+				},
+			},
+		},
+		UserData: aws.String(base64.StdEncoding.EncodeToString([]byte(`#!/bin/bash
+
+# rewrite the pause image url
+perl -pi -e 's#602401143452.dkr.ecr.us-west-2.amazonaws.com/eks/pause:3.5#public.ecr.aws/eks-distro/kubernetes/pause:3.2#' /etc/containerd/config.toml
+
+# hack systemd-run so it ignores the "-p StandardError=file:///some/file.log" option that isn't supported
+# by systemd
+sudo mv /usr/bin/systemd-run /usr/bin/systemd-run.real
+cat << __ESYSD__ > /usr/bin/systemd-run
+#!/usr/bin/env python3
+
+import sys
+import subprocess
+
+
+actual_args = ["systemd-run.real"]
+for arg in sys.argv[1:]:
+ if arg.startswith('StandardError'):
+  # remove the -p
+  actual_args.pop()
+ else:
+  actual_args.append(arg)
+
+subprocess.run(actual_args)
+__ESYSD__
+chmod a+x /usr/bin/systemd-run
+`))),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating instance, %w", err)
+	}
+
+	newInstance := &awsInstance{
+		instanceID: *rsv.Instances[0].InstanceId,
+		instance:   rsv.Instances[0],
+	}
+	instanceRunning := false
+	for i := 0; i < 30 && !instanceRunning; i++ {
+		if i > 0 {
+			time.Sleep(time.Second * 20)
+		}
+
+		op, err := awsEC2Service.DescribeInstances(&ec2.DescribeInstancesInput{
+			InstanceIds: []*string{&newInstance.instanceID},
+		})
+		if err != nil {
+			continue
+		}
+		instance := op.Reservations[0].Instances[0]
+		if *instance.State.Name != ec2.InstanceStateNameRunning {
+			continue
+		}
+		newInstance.publicIP = *instance.PublicIpAddress
+
+		// generate a temporary SSH key and send it to the node via instance-connect
+		key, err := generateKey()
+		if err != nil {
+			return nil, fmt.Errorf("creating SSH key, %w", err)
+		}
+		newInstance.sshKey = key
+		_, err = awsEC2ICService.SendSSHPublicKey(&ec2instanceconnect.SendSSHPublicKeyInput{
+			AvailabilityZone: nil,
+			InstanceId:       aws.String(newInstance.instanceID),
+			InstanceOSUser:   aws.String("ec2-user"),
+			SSHPublicKey:     aws.String(string(key.public)),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("sending SSH public key for serial console access, %w", err)
+		}
+
+		client, err := ssh.Dial("tcp", fmt.Sprintf("%s:22", newInstance.publicIP), &ssh.ClientConfig{
+			User:            "ec2-user",
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			Auth: []ssh.AuthMethod{
+				ssh.PublicKeys(key.signer),
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("dialing SSH, %w", err)
+		}
+
+		session, err := client.NewSession()
+		if err != nil {
+			err = fmt.Errorf("creating SSH session, %w", err)
+			continue
+		}
+
+		// ensure that containerd or CRIO is running
+		output, err := session.CombinedOutput("systemctl list-units  --type=service  --state=running | grep -e containerd -e crio")
+		if err != nil {
+			err = fmt.Errorf("instance %s not running containerd/crio daemon - Command failed: %s", newInstance.instanceID, string(output))
+			continue
+		}
+		if !strings.Contains(string(output), "containerd.service") &&
+			!strings.Contains(string(output), "crio.service") {
+			err = fmt.Errorf("instance %s not running containerd/crio daemon: %s", newInstance.instanceID, string(output))
+			continue
+		}
+
+		// add our ssh key to authorized keys so it will last longer than 60 seconds
+		session, err = client.NewSession()
+		if err != nil {
+			err = fmt.Errorf("creating SSH session, %w", err)
+			continue
+		}
+
+		output, err = session.CombinedOutput(fmt.Sprintf("echo '%s' >> ~/.ssh/authorized_keys", string(newInstance.sshKey.public)))
+		if err != nil {
+			err = fmt.Errorf("registering SSH key, %w", err)
+			continue
+		}
+
+		instanceRunning = true
+	}
+
+	if !instanceRunning {
+		return nil, fmt.Errorf("instance %s is not running, %w", newInstance.instanceID, err)
+	}
+	return newInstance, nil
+}
+
+type sshKey struct {
+	public  []byte
+	private []byte
+	signer  ssh.Signer
+}
+
+func generateKey() (sshKey, error) {
+	privateKey, err := rsa.GenerateKey(crand.Reader, 2048)
+	if err != nil {
+		return sshKey{}, fmt.Errorf("generating private key, %w", err)
+	}
+	if err := privateKey.Validate(); err != nil {
+		return sshKey{}, fmt.Errorf("validating private key, %w", err)
+	}
+
+	pubSSH, err := ssh.NewPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		return sshKey{}, fmt.Errorf("creating SSH key, %w", err)
+	}
+	pubKey := ssh.MarshalAuthorizedKey(pubSSH)
+
+	privDER := x509.MarshalPKCS1PrivateKey(privateKey)
+	privBlock := pem.Block{
+		Type:    "RSA PRIVATE KEY",
+		Headers: nil,
+		Bytes:   privDER,
+	}
+	privatePEM := pem.EncodeToMemory(&privBlock)
+
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		return sshKey{}, fmt.Errorf("creating signer, %w", err)
+	}
+	return sshKey{
+		public:  pubKey,
+		private: privatePEM,
+		signer:  signer,
+	}, nil
+}
 func updateKernelArguments(instance *compute.Instance, image string, kernelArgs []string) error {
 	kernelArgsString := strings.Join(kernelArgs, " ")
 
@@ -869,9 +1194,9 @@ func getComputeClient() (*compute.Service, error) {
 	return nil, err
 }
 
-func deleteInstance(host string) {
+func deleteGCEInstance(host string) {
 	klog.Infof("Deleting instance %q", host)
-	_, err := computeService.Instances.Delete(*project, *zone, host).Do()
+	_, err := gceComputeService.Instances.Delete(*project, *zone, host).Do()
 	if err != nil {
 		klog.Errorf("Error deleting instance %q: %v", host, err)
 	}
@@ -959,7 +1284,7 @@ func sourceImage(image, imageProject string) string {
 
 func machineType(machine string) string {
 	if machine == "" {
-		machine = defaultMachine
+		machine = defaultGCEMachine
 	}
 	return fmt.Sprintf("zones/%s/machineTypes/%s", *zone, machine)
 }
@@ -975,4 +1300,7 @@ func testsToGinkgoFocus(tests []string) string {
 		}
 	}
 	return focus + "\""
+}
+
+type sshService interface {
 }

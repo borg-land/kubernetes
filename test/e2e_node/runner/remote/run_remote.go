@@ -360,13 +360,13 @@ func main() {
 
 func testAWSImage(img internalAWSImage) *TestResult {
 	instance, err := createAWSInstance(img)
-	if *deleteInstances {
-		defer deleteAWSInstance(instance.instanceID)
-	}
 	if err != nil {
 		return &TestResult{
 			err: fmt.Errorf("unable to create EC2 instance for image %s.  %v", img.amiID, err),
 		}
+	}
+	if *deleteInstances {
+		defer deleteAWSInstance(instance.instanceID)
 	}
 	deleteFiles := !*deleteInstances && *cleanup
 	junitFileName := "shortname"

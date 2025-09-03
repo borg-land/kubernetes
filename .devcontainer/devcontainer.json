@@ -1,0 +1,4 @@
+{
+  "image": "us-central1-docker.pkg.dev/k8s-staging-test-infra/images/kubekins-e2e:latest-master",
+  "features": {}
+}

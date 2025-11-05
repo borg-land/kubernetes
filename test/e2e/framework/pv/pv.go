@@ -635,7 +635,7 @@ func MakePersistentVolumeClaim(cfg PersistentVolumeClaimConfig, ns string) *v1.P
 	}
 
 	if len(cfg.ClaimSize) == 0 {
-		cfg.ClaimSize = "2Gi"
+		cfg.ClaimSize = "10Gi"
 	}
 
 	if len(cfg.NamePrefix) == 0 {

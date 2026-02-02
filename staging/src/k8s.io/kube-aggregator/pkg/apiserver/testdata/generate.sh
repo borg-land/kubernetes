@@ -14,10 +14,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-cfssl gencert -initca generate.client-ca.json | cfssljson -bare client-ca
-cfssl gencert -initca generate.server-ca.json | cfssljson -bare server-ca
+# Generate client CA
+step certificate create "client-ca" client-ca.pem client-ca-key.pem \
+    --profile root-ca \
+    --no-password --insecure --force \
+    --not-after=876000h
 
-cfssl gencert -ca client-ca.pem -ca-key client-ca-key.pem -config generate.profiles.json --profile=client generate.client.json | cfssljson -bare client
-cfssl gencert -ca server-ca.pem -ca-key server-ca-key.pem -config generate.profiles.json --profile=server generate.server.json | cfssljson -bare server
+# Generate server CA
+step certificate create "server-ca" server-ca.pem server-ca-key.pem \
+    --profile root-ca \
+    --no-password --insecure --force \
+    --not-after=876000h
 
-rm ./*.csr
+# Generate client certificate
+step certificate create "My Client" client.pem client-key.pem \
+    --ca client-ca.pem --ca-key client-ca-key.pem \
+    --no-password --insecure --force \
+    --not-after=876000h
+
+# Generate server certificate
+step certificate create "test-service2.test-ns.svc" server.pem server-key.pem \
+    --ca server-ca.pem --ca-key server-ca-key.pem \
+    --no-password --insecure --force \
+    --not-after=876000h \
+    --san "test-service2.test-ns.svc"
+
+rm ./*.csr 2>/dev/null || true

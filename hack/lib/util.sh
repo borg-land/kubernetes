@@ -468,20 +468,20 @@ function kube::util::create_client_certkey {
     local ca=$3
     local id=$4
     local cn=${5:-$4}
-    local groups=""
-    local SEP=""
+    local orgs=""
     shift 5
     while [ -n "${1:-}" ]; do
-        groups+="${SEP}{\"O\":\"$1\"}"
-        SEP=","
+        orgs+=" --set organization=$1"
         shift 1
     done
     ${sudo} /usr/bin/env bash -e <<EOF
     cd ${dest_dir}
-    echo '{"CN":"${cn}","names":[${groups}],"hosts":[],"key":{"algo":"rsa","size":2048}}' | ${CFSSL_BIN} gencert -ca=${ca}.crt -ca-key=${ca}.key -config=${ca}-config.json - | ${CFSSLJSON_BIN} -bare client-${id}
-    mv "client-${id}-key.pem" "client-${id}.key"
-    mv "client-${id}.pem" "client-${id}.crt"
-    rm -f "client-${id}.csr"
+    ${STEP_BIN} certificate create "${cn}" "client-${id}.crt" "client-${id}.key" \
+        --ca="${ca}.crt" --ca-key="${ca}.key" \
+        --no-password --insecure --force \
+        --not-after=8760h \
+        --kty RSA --size 2048 \
+        ${orgs}
 EOF
 }
 
@@ -492,20 +492,20 @@ function kube::util::create_serving_certkey {
     local ca=$3
     local id=$4
     local cn=${5:-$4}
-    local hosts=""
-    local SEP=""
+    local san_args=""
     shift 5
     while [ -n "${1:-}" ]; do
-        hosts+="${SEP}\"$1\""
-        SEP=","
+        san_args+=" --san=$1"
         shift 1
     done
     ${sudo} /usr/bin/env bash -e <<EOF
     cd ${dest_dir}
-    echo '{"CN":"${cn}","hosts":[${hosts}],"key":{"algo":"rsa","size":2048}}' | ${CFSSL_BIN} gencert -ca=${ca}.crt -ca-key=${ca}.key -config=${ca}-config.json - | ${CFSSLJSON_BIN} -bare serving-${id}
-    mv "serving-${id}-key.pem" "serving-${id}.key"
-    mv "serving-${id}.pem" "serving-${id}.crt"
-    rm -f "serving-${id}.csr"
+    ${STEP_BIN} certificate create "${cn}" "serving-${id}.crt" "serving-${id}.key" \
+        --ca="${ca}.crt" --ca-key="${ca}.key" \
+        --no-password --insecure --force \
+        --not-after=8760h \
+        --kty RSA --size 2048 \
+        ${san_args}
 EOF
 }
 
@@ -606,67 +606,56 @@ function kube::util::join {
   echo "$*"
 }
 
-# Downloads cfssl/cfssljson into $1 directory if they do not already exist in PATH
+# Downloads step into $1 directory if it does not already exist in PATH
 #
 # Assumed vars:
-#   $1 (cfssl directory) (optional)
+#   $1 (step directory) (optional)
 #
 # Sets:
-#  CFSSL_BIN: The path of the installed cfssl binary
-#  CFSSLJSON_BIN: The path of the installed cfssljson binary
+#  STEP_BIN: The path of the installed step binary
 #
 # shellcheck disable=SC2120 # optional parameters
-function kube::util::ensure-cfssl {
-  if command -v cfssl &>/dev/null && command -v cfssljson &>/dev/null; then
-    CFSSL_BIN=$(command -v cfssl)
-    CFSSLJSON_BIN=$(command -v cfssljson)
+function kube::util::ensure-step {
+  if command -v step &>/dev/null; then
+    STEP_BIN=$(command -v step)
     return 0
   fi
 
   host_arch=$(kube::util::host_arch)
+  host_os=$(kube::util::host_os)
 
-  if [[ "${host_arch}" != "amd64" ]]; then
-    echo "Cannot download cfssl on non-amd64 hosts and cfssl does not appear to be installed."
-    echo "Please install cfssl and cfssljson and verify they are in \$PATH."
-    echo "Hint: export PATH=\$PATH:\$GOPATH/bin; go install github.com/cloudflare/cfssl/cmd/...@latest"
-    exit 1
-  fi
-
-  # Create a temp dir for cfssl if no directory was given
-  local cfssldir=${1:-}
-  if [[ -z "${cfssldir}" ]]; then
+  # Create a temp dir for step if no directory was given
+  local stepdir=${1:-}
+  if [[ -z "${stepdir}" ]]; then
     kube::util::ensure-temp-dir
-    cfssldir="${KUBE_TEMP}/cfssl"
+    stepdir="${KUBE_TEMP}/step"
   fi
 
-  mkdir -p "${cfssldir}"
-  pushd "${cfssldir}" > /dev/null || return 1
+  mkdir -p "${stepdir}"
+  pushd "${stepdir}" > /dev/null || return 1
 
-    echo "Unable to successfully run 'cfssl' from ${PATH}; downloading instead..."
-    kernel=$(uname -s)
-    case "${kernel}" in
-      Linux)
-        curl --retry 10 -L -o cfssl https://github.com/cloudflare/cfssl/releases/download/v1.5.0/cfssl_1.5.0_linux_amd64
-        curl --retry 10 -L -o cfssljson https://github.com/cloudflare/cfssl/releases/download/v1.5.0/cfssljson_1.5.0_linux_amd64
+    echo "Unable to successfully run 'step' from ${PATH}; downloading instead..."
+    local step_version="0.29.0"
+    case "${host_os}" in
+      linux)
+        curl --retry 10 -L -o step.tar.gz "https://github.com/smallstep/cli/releases/download/v${step_version}/step_linux_${step_version}_${host_arch}.tar.gz"
         ;;
-      Darwin)
-        curl --retry 10 -L -o cfssl https://github.com/cloudflare/cfssl/releases/download/v1.5.0/cfssl_1.5.0_darwin_amd64
-        curl --retry 10 -L -o cfssljson https://github.com/cloudflare/cfssl/releases/download/v1.5.0/cfssljson_1.5.0_darwin_amd64
+      darwin)
+        curl --retry 10 -L -o step.tar.gz "https://github.com/smallstep/cli/releases/download/v${step_version}/step_darwin_${step_version}_${host_arch}.tar.gz"
         ;;
       *)
-        echo "Unknown, unsupported platform: ${kernel}." >&2
+        echo "Unknown, unsupported platform: ${host_os}." >&2
         echo "Supported platforms: Linux, Darwin." >&2
         exit 2
     esac
 
-    chmod +x cfssl || true
-    chmod +x cfssljson || true
+    tar -xzf step.tar.gz
+    STEP_BIN="${stepdir}/step_${step_version}/bin/step"
+    chmod +x "${STEP_BIN}" || true
 
-    CFSSL_BIN="${cfssldir}/cfssl"
-    CFSSLJSON_BIN="${cfssldir}/cfssljson"
-    if [[ ! -x ${CFSSL_BIN} || ! -x ${CFSSLJSON_BIN} ]]; then
-      echo "Failed to download 'cfssl'. Please install cfssl and cfssljson and verify they are in \$PATH."
-      echo "Hint: export PATH=\$PATH:\$GOPATH/bin; go install github.com/cloudflare/cfssl/cmd/...@latest"
+    if [[ ! -x ${STEP_BIN} ]]; then
+      echo "Failed to download 'step'. Please install step and verify it is in \$PATH."
+      echo "Hint: See https://github.com/smallstep/cli for installation instructions"
       exit 1
     fi
   popd > /dev/null || return 1

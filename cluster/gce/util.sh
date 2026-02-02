@@ -1954,7 +1954,7 @@ function generate-konnectivity-server-certs {
 
     kube::util::ensure-step "${KUBE_TEMP}/step"
 
-    # create the konnectivity agent cert with the correct groups
+    # create the konnectivity server cert with the correct groups
     "${STEP_BIN}" certificate create "konnectivity-server" "konnectivity-agent.pem" "konnectivity-agent-key.pem" \
         --ca=pki/ca.crt --ca-key=pki/private/ca.key \
         --no-password --insecure --force \

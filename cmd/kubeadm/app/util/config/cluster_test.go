@@ -319,7 +319,7 @@ func TestGetNodeRegistration(t *testing.T) {
 				}
 			}
 
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 
 			if rt.node != nil {
 				_, err := client.CoreV1().Nodes().Create(context.TODO(), rt.node, metav1.CreateOptions{})
@@ -330,7 +330,7 @@ func TestGetNodeRegistration(t *testing.T) {
 			}
 
 			cfg := &kubeadmapi.InitConfiguration{}
-			err = GetNodeRegistration(cfgPath, client, &cfg.NodeRegistration, &cfg.ClusterConfiguration)
+			err = GetNodeRegistration(cfgPath, client, &cfg.NodeRegistration)
 			if rt.expectedError != (err != nil) {
 				t.Errorf("unexpected return err from getNodeRegistration: %v", err)
 				return
@@ -457,7 +457,7 @@ func TestGetAPIEndpointWithBackoff(t *testing.T) {
 
 	for _, rt := range tests {
 		t.Run(rt.name, func(t *testing.T) {
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 			if rt.staticPod != nil {
 				rt.staticPod.NodeName = rt.nodeName
 				if err := rt.staticPod.Create(client); err != nil {
@@ -491,13 +491,14 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 	defer os.RemoveAll(tmpdir)
 
 	var tests = []struct {
-		name            string
-		fileContents    []byte
-		node            *v1.Node
-		staticPods      []testresources.FakeStaticPod
-		configMaps      []testresources.FakeConfigMap
-		newControlPlane bool
-		expectedError   bool
+		name                string
+		fileContents        []byte
+		node                *v1.Node
+		staticPods          []testresources.FakeStaticPod
+		configMaps          []testresources.FakeConfigMap
+		getNodeRegistration bool
+		getAPIEndpoint      bool
+		expectedError       bool
 	}{
 		{
 			name:          "invalid - No kubeadm-config ConfigMap",
@@ -556,6 +557,8 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 					Taints: []v1.Taint{kubeadmconstants.ControlPlaneTaint},
 				},
 			},
+			getNodeRegistration: true,
+			getAPIEndpoint:      true,
 		},
 		{
 			name: "valid v1beta3 - new control plane == true", // InitConfiguration composed with data from different places, without node specific information
@@ -588,7 +591,8 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 					},
 				},
 			},
-			newControlPlane: true,
+			getNodeRegistration: false,
+			getAPIEndpoint:      false,
 		},
 	}
 
@@ -603,7 +607,7 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 				}
 			}
 
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 
 			if rt.node != nil {
 				_, err := client.CoreV1().Nodes().Create(context.TODO(), rt.node, metav1.CreateOptions{})
@@ -629,7 +633,8 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 				}
 			}
 
-			cfg, err := getInitConfigurationFromCluster(tmpdir, client, rt.newControlPlane, false)
+			getComponentConfigs := true
+			cfg, err := getInitConfigurationFromCluster(tmpdir, client, rt.getNodeRegistration, rt.getAPIEndpoint, getComponentConfigs)
 			if rt.expectedError != (err != nil) {
 				t.Errorf("unexpected return err from getInitConfigurationFromCluster: %v", err)
 				return
@@ -649,13 +654,13 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 			if cfg.NodeRegistration.ImagePullPolicy != kubeadmapiv1.DefaultImagePullPolicy {
 				t.Errorf("invalid cfg.NodeRegistration.ImagePullPolicy %v", cfg.NodeRegistration.ImagePullPolicy)
 			}
-			if !rt.newControlPlane && (cfg.LocalAPIEndpoint.AdvertiseAddress != "1.2.3.4" || cfg.LocalAPIEndpoint.BindPort != 1234) {
+			if rt.getNodeRegistration && rt.getAPIEndpoint && (cfg.LocalAPIEndpoint.AdvertiseAddress != "1.2.3.4" || cfg.LocalAPIEndpoint.BindPort != 1234) {
 				t.Errorf("invalid cfg.LocalAPIEndpoint: %v", cfg.LocalAPIEndpoint)
 			}
-			if !rt.newControlPlane && (cfg.NodeRegistration.Name != nodeName || cfg.NodeRegistration.CRISocket != "myCRIsocket" || len(cfg.NodeRegistration.Taints) != 1) {
+			if rt.getNodeRegistration && (cfg.NodeRegistration.Name != nodeName || cfg.NodeRegistration.CRISocket != "myCRIsocket" || len(cfg.NodeRegistration.Taints) != 1) {
 				t.Errorf("invalid cfg.NodeRegistration: %v", cfg.NodeRegistration)
 			}
-			if rt.newControlPlane && len(cfg.NodeRegistration.CRISocket) > 0 {
+			if !rt.getNodeRegistration && len(cfg.NodeRegistration.CRISocket) > 0 {
 				t.Errorf("invalid cfg.NodeRegistration.CRISocket: expected empty CRISocket, but got %v", cfg.NodeRegistration.CRISocket)
 			}
 			if _, ok := cfg.ComponentConfigs[componentconfigs.KubeletGroup]; !ok {
@@ -712,7 +717,7 @@ func TestGetAPIEndpointFromPodAnnotation(t *testing.T) {
 	}
 	for _, rt := range tests {
 		t.Run(rt.name, func(t *testing.T) {
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 			for i, pod := range rt.pods {
 				pod.NodeName = rt.nodeName
 				if err := pod.CreateWithPodSuffix(client, strconv.Itoa(i)); err != nil {
@@ -828,7 +833,7 @@ func TestGetRawAPIEndpointFromPodAnnotationWithoutRetry(t *testing.T) {
 	}
 	for _, rt := range tests {
 		t.Run(rt.name, func(t *testing.T) {
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 			for i, pod := range rt.pods {
 				pod.NodeName = rt.nodeName
 				if err := pod.CreateWithPodSuffix(client, strconv.Itoa(i)); err != nil {
@@ -913,7 +918,7 @@ func TestGetNodeNameFromSSR(t *testing.T) {
 	}
 	for _, rt := range tests {
 		t.Run(rt.name, func(t *testing.T) {
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 			rt.clientSetup(client)
 
 			nodeName, err := getNodeNameFromSSR(client)

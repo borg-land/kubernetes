@@ -30,7 +30,6 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	kubeletstatsv1alpha1 "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 	"k8s.io/kubernetes/pkg/features"
-	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
@@ -368,11 +367,8 @@ var _ = SIGDescribe("Summary API", framework.WithNodeConformance(), func() {
 		})
 	})
 
-	framework.Context("when querying /stats/summary under pressure", feature.KubeletPSI, framework.WithSerial(), func() {
+	framework.Context("when querying /stats/summary under pressure", framework.WithSerial(), framework.WithNodeConformance(), framework.WithFeatureGate(features.KubeletPSI), func() {
 		ginkgo.BeforeEach(func() {
-			if !utilfeature.DefaultFeatureGate.Enabled(features.KubeletPSI) {
-				ginkgo.Skip("KubeletPSI feature gate is not enabled")
-			}
 			if !IsCgroup2UnifiedMode() {
 				ginkgo.Skip("Skipping since CgroupV2 not used")
 			}
@@ -381,7 +377,16 @@ var _ = SIGDescribe("Summary API", framework.WithNodeConformance(), func() {
 		ginkgo.It("should report CPU pressure in PSI metrics", func(ctx context.Context) {
 			podName := "cpu-pressure-pod"
 			ginkgo.By("Creating a pod to generate CPU pressure")
-			pod := e2epod.NewPodClient(f).Create(ctx, getStressTestPod(podName, "cpu-stress", []string{"stress", "--cpus", "1"}))
+			podSpec := getStressTestPod(podName, "cpu-stress", []string{"stress", "--cpus", "1"})
+			podSpec.Spec.Containers[0].Resources = v1.ResourceRequirements{
+				Limits: v1.ResourceList{
+					v1.ResourceCPU: resource.MustParse("500m"),
+				},
+				Requests: v1.ResourceList{
+					v1.ResourceCPU: resource.MustParse("500m"),
+				},
+			}
+			pod := e2epod.NewPodClient(f).Create(ctx, podSpec)
 
 			ginkgo.By("Waiting for the pod to start")
 			framework.ExpectNoError(e2epod.WaitForPodRunningInNamespace(ctx, f.ClientSet, pod))
@@ -400,6 +405,21 @@ var _ = SIGDescribe("Summary API", framework.WithNodeConformance(), func() {
 		})
 
 		ginkgo.It("should report Memory pressure in PSI metrics", func(ctx context.Context) {
+			runtime, _, err := getCRIClient()
+			framework.ExpectNoError(err)
+			resp, err := runtime.Version(ctx, "")
+			framework.ExpectNoError(err)
+
+			if resp.GetRuntimeName() == "cri-o" {
+				// Skip this test for CRI-O (used on Fedora CoreOS in test CI) until automatic
+				// memory.high configuration is available. The test fails on Fedora CoreOS due to
+				// different page cache reclaim behavior. CRI-O is implementing a fix to automatically
+				// set memory.high to 95% of memory.max for cgroup v2 containers.
+				// See: https://github.com/cri-o/cri-o/pull/9714
+				// See: https://github.com/coreos/fedora-coreos-tracker/issues/2094
+				ginkgo.Skip("Skipping for CRI-O until automatic memory.high configuration is available")
+			}
+
 			podName := "memory-pressure-pod"
 			ginkgo.By("Creating a pod to generate Memory pressure")
 			// Create a pod that generates memory pressure by continuously writing to files,

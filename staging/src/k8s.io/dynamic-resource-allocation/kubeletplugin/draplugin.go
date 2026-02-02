@@ -58,8 +58,8 @@ type DRAPlugin interface {
 	// for the given ResourceClaims. This is used to implement
 	// the gRPC NodePrepareResources call.
 	//
-	// It gets called with the complete list of claims that are needed
-	// by some pod. In contrast to the gRPC call, the helper has
+	// It gets called with the complete list of claims handled by this DRA driver
+	// that are needed by some pod. In contrast to the gRPC call, the helper has
 	// already retrieved the actual ResourceClaim objects.
 	//
 	// In addition to that, the helper also:
@@ -199,13 +199,18 @@ type Device struct {
 	// Each ID must be of the form "<vendor ID>/<class>=<unique name>".
 	// May be empty.
 	CDIDeviceIDs []string
+
+	// ShareID identifes the device share.
+	// May be empty.
+	ShareID *types.UID
 }
 
 // Option implements the functional options pattern for Start.
 type Option func(o *options) error
 
 // DriverName defines the driver name for the dynamic resource allocation driver.
-// Must be set.
+// Must be set. Must be a DNS subdomain and should end with a DNS domain
+// owned by the vendor of the driver. It should use only lower case characters.
 func DriverName(driverName string) Option {
 	return func(o *options) error {
 		o.driverName = driverName
@@ -810,6 +815,13 @@ func (d *Helper) SetGetInfoError(err error) {
 	d.registrar.setGetInfoError(err)
 }
 
+// SetNotifyRegistrationStatusError configures the registration server
+// to make NotifyRegistrationStatus calls return the specified error.
+// To restore normal behavior, call SetNotifyRegistrationStatusError(nil).
+func (d *Helper) SetNotifyRegistrationStatusError(err error) {
+	d.registrar.setNotifyRegistrationStatusError(err)
+}
+
 // serializeGRPCIfEnabled locks a mutex if serialization is enabled.
 // Either way it returns a method that the caller must invoke
 // via defer.
@@ -869,6 +881,7 @@ func (d *nodePluginImplementation) NodePrepareResources(ctx context.Context, req
 				PoolName:     result.PoolName,
 				DeviceName:   result.DeviceName,
 				CdiDeviceIds: result.CDIDeviceIDs,
+				ShareId:      (*string)(result.ShareID),
 			}
 			devices = append(devices, device)
 		}

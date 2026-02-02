@@ -133,7 +133,7 @@ linters:
 
       - linters:
           - govet
-        text: "lostcancel|printf"
+        text: "lostcancel"
 
       - linters:
           - ginkgolinter
@@ -141,12 +141,7 @@ linters:
 
       - linters:
           - gocritic
-        text: "append result not assigned to the same slice|put a space between `//` and comment text|sloppyLen|elseif|should rewrite switch statement to if statement|regexpMust|wrapperFunc: use strings.ReplaceAll|singleCaseSwitch|deprecatedComment|exitAfterDefer|captLocal|unlambda|underef|unslice|valSwap|typeSwitchVar"
-
-      # https://github.com/kubernetes/kubernetes/issues/117288#issuecomment-1507008918
-      - linters:
-          - gocritic
-        text: "assignOp:"
+        text: "wrapperFunc: use strings.ReplaceAll|should rewrite switch statement to if statement"
 
     {{- end}}
 
@@ -156,6 +151,10 @@ linters:
         path-except: staging/src/k8s.io/api/.*
         
       {{include "hack/kube-api-linter/exceptions.yaml" | indent 6 | trim}}
+
+      - linters:
+        - forbidigo
+        path: test/e2e/e2e_test\.go|test/e2e/framework/internal/.*|test/e2e/framework/[^/]*\.go|test/e2e/invariants/.*
 
   default: {{if .Base -}} none {{- else -}} standard {{- end}}
   enable: # please keep this alphabetized
@@ -170,6 +169,7 @@ linters:
     - ineffassign
     - kubeapilinter
     - logcheck
+    - modernize
     - revive
     - sorted
     - staticcheck
@@ -204,6 +204,12 @@ linters:
           {{include "hack/kube-api-linter/kube-api-linter.yaml" | indent 10 | trim}}
     depguard:
       rules:
+        utils:
+          files:
+            - $all
+          deny:
+            - pkg: "k8s.io/utils/pointer"
+              desc: "k8s.io/utils/pointer shall no longer be used, please use k8s.io/utils/ptr."
         go-cmp:
           files:
             - $all
@@ -219,6 +225,9 @@ linters:
     forbidigo:
       analyze-types: true
       forbid:
+        - pattern: md5\.*
+          # https://github.com/kubernetes/kubernetes/issues/129652
+          msg: md5 is oudated, insecure, prefer a secure hash (such as sha256) or a non-cryptographic hash
         - pattern: ^managedfields\.ExtractInto$
           pkg: ^k8s\.io/apimachinery/pkg/util/managedfields$
           msg: should not be used because managedFields was removed
@@ -227,7 +236,11 @@ linters:
           msg: should not be used because managedFields was removed
         - pattern: \.Add$
           pkg: ^k8s\.io/component-base/featuregate$         
-          msg: should not use Add, use AddVersioned instead 
+          msg: should not use Add, use AddVersioned instead
+        - pattern: \.(ReportBeforeSuite|ReportAfterSuite)
+          pkg: ^github\.com/onsi/ginkgo/v2$
+          msg: usage is restricted to code under control of SIG Testing
+          # Exceptions are listed above under rules.
       {{- if .Hints}}
         - pattern: ^gomega\.BeTrue$
           pkg: ^github.com/onsi/gomega$
@@ -238,11 +251,65 @@ linters:
       {{- end}}
       {{- if .Base }}
     gocritic:
-      enabled-checks:
-        - equalFold
+      enabled-checks: # These are in addition to the default checks - see https://golangci-lint.run/docs/linters/configuration/#gocritic
         - boolExprSimplify
+        - equalFold
+      disabled-checks: # This disables checks that are enabled by default (this can be combined with enabled-checks, contrary to the docs)
+        - appendAssign
+        - assignOp # https://github.com/kubernetes/kubernetes/issues/117288#issuecomment-1507008918
+        - captLocal
+        - commentFormatting
         - deprecatedComment
+        - elseif
+        # The following have few (single-digit) occurrences left in k/k and wouldn't be too onerous to enable
+        - exitAfterDefer
+        - regexpMust
+        - sloppyLen
+        - typeSwitchVar
+        - underef
+        - unslice
     {{- end}}
+    modernize:
+      # List of analyzers to disable.
+      # By default, all analyzers are enabled but in
+      # Kubernetes we want to be more selective and
+      # disable those which are not useful for it.
+      disable:
+        # Replace interface{} with any.
+        - any
+        # Replace for-range over b.N with b.Loop.
+        - bloop
+        # Replace []byte(fmt.Sprintf) with fmt.Appendf.
+        - fmtappendf
+        # Remove redundant re-declaration of loop variables.
+        - forvar
+        # Replace explicit loops over maps with calls to maps package.
+        - mapsloop
+        # Replace if/else statements with calls to min or max.
+        - minmax
+        # Suggest replacing omitempty with omitzero for struct fields.
+        - omitzero
+        # Replace 3-clause for loops with for-range over integers.
+        - rangeint
+        # Replace reflect.TypeOf(x) with TypeFor[T]().
+        - reflecttypefor
+        # Replace loops with slices.Contains or slices.ContainsFunc.
+        - slicescontains
+        # Replace sort.Slice with slices.Sort for basic types.
+        - slicessort
+        # Use iterators instead of Len/At-style APIs.
+        - stditerators
+        # Replace HasPrefix/TrimPrefix with CutPrefix.
+        - stringscutprefix
+        # Replace ranging over Split/Fields with SplitSeq/FieldsSeq.
+        - stringsseq
+        # Replace += with strings.Builder.
+        - stringsbuilder
+        # Replace context.WithCancel with t.Context in tests.
+        - testingcontext
+        # Replace wg.Add(1)/go/wg.Done() with wg.Go.
+        - waitgroup
+
     revive:
       # Only these rules are enabled.
       rules:

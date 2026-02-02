@@ -1,5 +1,4 @@
 //go:build !windows
-// +build !windows
 
 /*
 Copyright 2024 The Kubernetes Authors.
@@ -34,7 +33,7 @@ import (
 )
 
 func TestMakeUserNsManagerSwitch(t *testing.T) {
-	logger, ctx := ktesting.NewTestContext(t)
+	logger, _ := ktesting.NewTestContext(t)
 	// Create the manager with the feature gate enabled, to record some pods on disk.
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.UserNamespacesSupport, true)
 
@@ -46,20 +45,20 @@ func TestMakeUserNsManagerSwitch(t *testing.T) {
 		// manager, it will find these pods on disk with userns data.
 		podList: pods,
 	}
-	m, err := MakeUserNsManager(logger, testUserNsPodsManager)
+	m, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 	require.NoError(t, err)
 
 	// Record the pods on disk.
 	for _, podUID := range pods {
 		pod := v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: podUID}}
-		_, err := m.GetOrCreateUserNamespaceMappings(ctx, &pod, "")
+		_, err := m.GetOrCreateUserNamespaceMappings(logger, &pod, "")
 		require.NoError(t, err, "failed to record userns range for pod %v", podUID)
 	}
 
 	// Test re-init works when the feature gate is disabled and there were some
 	// pods written on disk.
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.UserNamespacesSupport, false)
-	m2, err := MakeUserNsManager(logger, testUserNsPodsManager)
+	m2, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 	require.NoError(t, err)
 
 	// The feature gate is off, no pods should be allocated.
@@ -70,7 +69,7 @@ func TestMakeUserNsManagerSwitch(t *testing.T) {
 }
 
 func TestGetOrCreateUserNamespaceMappingsSwitch(t *testing.T) {
-	logger, ctx := ktesting.NewTestContext(t)
+	logger, _ := ktesting.NewTestContext(t)
 	// Enable the feature gate to create some pods on disk.
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.UserNamespacesSupport, true)
 
@@ -82,13 +81,13 @@ func TestGetOrCreateUserNamespaceMappingsSwitch(t *testing.T) {
 		// manager, it will find these pods on disk with userns data.
 		podList: pods,
 	}
-	m, err := MakeUserNsManager(logger, testUserNsPodsManager)
+	m, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 	require.NoError(t, err)
 
 	// Record the pods on disk.
 	for _, podUID := range pods {
 		pod := v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: podUID}}
-		_, err := m.GetOrCreateUserNamespaceMappings(ctx, &pod, "")
+		_, err := m.GetOrCreateUserNamespaceMappings(logger, &pod, "")
 		require.NoError(t, err, "failed to record userns range for pod %v", podUID)
 	}
 
@@ -96,12 +95,12 @@ func TestGetOrCreateUserNamespaceMappingsSwitch(t *testing.T) {
 	// pods registered on disk.
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.UserNamespacesSupport, false)
 	// Create a new manager with the feature gate off and verify the userns range is nil.
-	m2, err := MakeUserNsManager(logger, testUserNsPodsManager)
+	m2, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 	require.NoError(t, err)
 
 	for _, podUID := range pods {
 		pod := v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: podUID}}
-		userns, err := m2.GetOrCreateUserNamespaceMappings(ctx, &pod, "")
+		userns, err := m2.GetOrCreateUserNamespaceMappings(logger, &pod, "")
 
 		assert.NoError(t, err, "failed to record userns range for pod %v", podUID)
 		assert.Nil(t, userns, "userns range should be nil for pod %v", podUID)
@@ -120,13 +119,13 @@ func TestCleanupOrphanedPodUsernsAllocationsSwitch(t *testing.T) {
 		podList: listPods,
 	}
 
-	m, err := MakeUserNsManager(logger, testUserNsPodsManager)
+	m, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 	require.NoError(t, err)
 
 	// Record the pods on disk.
 	for _, podUID := range pods {
 		pod := v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: podUID}}
-		_, err := m.GetOrCreateUserNamespaceMappings(ctx, &pod, "")
+		_, err := m.GetOrCreateUserNamespaceMappings(logger, &pod, "")
 		require.NoError(t, err, "failed to record userns range for pod %v", podUID)
 	}
 

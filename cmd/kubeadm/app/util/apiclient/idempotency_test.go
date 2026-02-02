@@ -110,7 +110,7 @@ func testCreateOrUpdate[T kubernetesObject](t *testing.T, resource, resources st
 
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf(tc.nameFormat, resource), func(t *testing.T) {
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 			tc.setupClient(client, resources)
 			err := CreateOrUpdate(clientBuilder(client, empty), empty)
 			if (err != nil) != tc.expectedError {
@@ -203,7 +203,7 @@ func testCreateOrMutate[T kubernetesObject](t *testing.T, resource, resources st
 
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf(tc.nameFormat, resource), func(t *testing.T) {
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 			tc.setupClient(client)
 			err := CreateOrMutate[T](clientBuilder(client, empty), empty, tc.mutator)
 			if (err != nil) != tc.expectedError {
@@ -272,7 +272,7 @@ func testCreateOrRetain[T kubernetesObject](t *testing.T, resource, resources st
 
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf(tc.nameFormat, resource), func(t *testing.T) {
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 			tc.setupClient(client)
 			err := CreateOrRetain[T](clientBuilder(client, empty), empty, resource)
 			if (err != nil) != tc.expectedError {
@@ -387,54 +387,6 @@ func TestPatchNodeOnce(t *testing.T) {
 			success: false,
 		},
 		{
-			name:       "patch node when timeout",
-			lookupName: "testnode",
-			node: v1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "testnode",
-					Labels: map[string]string{v1.LabelHostname: ""},
-				},
-			},
-			success:   false,
-			fakeError: apierrors.NewTimeoutError("fake timeout", -1),
-		},
-		{
-			name:       "patch node when conflict",
-			lookupName: "testnode",
-			node: v1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "testnode",
-					Labels: map[string]string{v1.LabelHostname: ""},
-				},
-			},
-			success:   false,
-			fakeError: apierrors.NewConflict(schema.GroupResource{}, "fake conflict", nil),
-		},
-		{
-			name:       "patch node when there is a server timeout",
-			lookupName: "testnode",
-			node: v1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "testnode",
-					Labels: map[string]string{v1.LabelHostname: ""},
-				},
-			},
-			success:   false,
-			fakeError: apierrors.NewServerTimeout(schema.GroupResource{}, "fake server timeout", 1),
-		},
-		{
-			name:       "patch node when the service is unavailable",
-			lookupName: "testnode",
-			node: v1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "testnode",
-					Labels: map[string]string{v1.LabelHostname: ""},
-				},
-			},
-			success:   false,
-			fakeError: apierrors.NewServiceUnavailable("fake service unavailable"),
-		},
-		{
 			name:       "patch node failed with unknown error",
 			lookupName: "testnode",
 			node: v1.Node{
@@ -450,7 +402,7 @@ func TestPatchNodeOnce(t *testing.T) {
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 			_, err := client.CoreV1().Nodes().Create(context.Background(), &tc.node, metav1.CreateOptions{})
 			if err != nil {
 				t.Fatalf("failed to create node to fake client: %v", err)
@@ -513,7 +465,7 @@ func TestPatchNode(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 			tc.setupClient(client)
 			patchFn := func(*v1.Node) {}
 			err := PatchNode(client, "some-node", patchFn)
@@ -560,7 +512,7 @@ func TestGetConfigMapWithShortRetry(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			client := clientsetfake.NewSimpleClientset()
+			client := clientsetfake.NewClientset()
 			tc.setupClient(client)
 			actual, err := GetConfigMapWithShortRetry(client, "ns", "some-cm")
 			if (err != nil) != tc.expectedError {

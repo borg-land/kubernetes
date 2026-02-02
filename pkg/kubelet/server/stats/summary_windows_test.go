@@ -1,5 +1,4 @@
 //go:build windows
-// +build windows
 
 /*
 Copyright 2018 The Kubernetes Authors.
@@ -55,7 +54,7 @@ func TestSummaryProvider(t *testing.T) {
 	assert := assert.New(t)
 
 	mockStatsProvider := statstest.NewMockProvider(t)
-	mockStatsProvider.EXPECT().GetNode().Return(node, nil).Maybe()
+	mockStatsProvider.EXPECT().GetNode(ctx).Return(node, nil).Maybe()
 	mockStatsProvider.EXPECT().GetNodeConfig().Return(nodeConfig).Maybe()
 	mockStatsProvider.EXPECT().GetPodCgroupRoot().Return(cgroupRoot).Maybe()
 	mockStatsProvider.EXPECT().ListPodStats(ctx).Return(podStats, nil).Maybe()

@@ -47,7 +47,9 @@ type Queue interface {
 	// may return an ErrRequeue{inner} and in this case Pop will (a)
 	// return that (key, accumulator) association to the Queue as part
 	// of the atomic processing and (b) return the inner error from
-	// Pop.
+	// Pop. It is expected that the caller of Pop will be a single
+	// threaded consumer since otherwise it is possible for multiple
+	// PopProcessFuncs to be running simultaneously.
 	Pop(PopProcessFunc) (interface{}, error)
 
 	// HasSynced returns true if the first batch of keys have all been
@@ -60,19 +62,27 @@ type Queue interface {
 	Close()
 }
 
-// Pop is helper function for popping from Queue.
-// WARNING: Do NOT use this function in non-test code to avoid races
-// unless you really really really really know what you are doing.
+// QueueWithBatch extends the Queue interface with support for batch processing.
 //
-// NOTE: This function is deprecated and may be removed in the future without
-// additional warning.
-func Pop(queue Queue) interface{} {
-	var result interface{}
-	queue.Pop(func(obj interface{}, isInInitialList bool) error {
-		result = obj
-		return nil
-	})
-	return result
+// In addition to the standard single-item Pop method, QueueWithBatch provides
+// PopBatch, which allows multiple items to be popped and processed together as
+// a batch. This can be used to improve processing efficiency when it is
+// beneficial to handle multiple queued keys or accumulators in a single
+// operation.
+// TODO: Consider merging this interface into Queue after feature gate GA
+type QueueWithBatch interface {
+	Queue
+
+	// PopBatch behaves similarly to Queue#Pop, but processes multiple keys
+	// as a batch. The implementation determines the batching strategy,
+	// such as the number of keys to include per batch. The ProcessBatchFunc
+	// is called when a batch is ready to be processed. The PopProcessFunc
+	// is called when a singleton item is ready to be processed. The
+	// ProcessBatchFunc and PopProcessFunc must do the same processing to
+	// ensure consistent behavior. It is expected that the caller of PopBatch
+	// will be a single threaded consumer since otherwise it is possible for
+	// multiple ProcessBatchFuncs/PopProcessFuncs to be running simultaneously.
+	PopBatch(processBatch ProcessBatchFunc, processSingle PopProcessFunc) error
 }
 
 // FIFO is a Queue in which (a) each accumulator is simply the most

@@ -22,7 +22,6 @@ KUBE_ROOT=$(dirname "${BASH_SOURCE[0]}")/../..
 source "${KUBE_ROOT}/hack/lib/init.sh"
 
 kube::golang::setup_env
-kube::golang::setup_gomaxprocs
 kube::util::require-jq
 
 # start the cache mutation detector by default so that cache mutators will be found
@@ -102,7 +101,7 @@ isnum() {
   [[ "$1" =~ ^[0-9]+$ ]]
 }
 
-PARALLEL="${PARALLEL:-1}"
+PARALLEL="${PARALLEL:--1}"
 while getopts "hp:i:" opt ; do
   case ${opt} in
     h)
@@ -174,6 +173,10 @@ set -- "${testcases[@]+${testcases[@]}}"
 
 if [[ -n "${KUBE_RACE}" ]] ; then
   goflags+=("${KUBE_RACE}")
+fi
+
+if [[ "${PARALLEL}" -gt 0 ]]; then
+  goflags+=(-p "${PARALLEL}")
 fi
 
 junitFilenamePrefix() {

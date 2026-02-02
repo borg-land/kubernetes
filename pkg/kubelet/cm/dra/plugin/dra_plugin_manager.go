@@ -58,9 +58,12 @@ type DRAPluginManager struct {
 	backgroundCtx context.Context
 	cancel        func(err error)
 	kubeClient    kubernetes.Interface
-	getNode       func() (*v1.Node, error)
+	getNode       func(context.Context) (*v1.Node, error)
 	wipingDelay   time.Duration
 	streamHandler StreamHandler
+
+	// withIdleTimeout is only for unit testing, ignore if <= 0.
+	withIdleTimeout time.Duration
 
 	wg    sync.WaitGroup
 	mutex sync.RWMutex
@@ -115,7 +118,13 @@ func (m *monitoredPlugin) HandleConn(_ context.Context, stats grpcstats.ConnStat
 	case *grpcstats.ConnEnd:
 		// We have to ask for a reconnect, otherwise gRPC wouldn't try and
 		// thus we wouldn't be notified about a restart of the plugin.
-		m.conn.Connect()
+		//
+		// This must be done in a goroutine because gRPC deadlocks
+		// when called directly from inside HandleConn when a connection
+		// goes idle (and only then). It looks like cc.idlenessMgr.ExitIdleMode
+		// in Connect tries to lock a mutex that is already locked by
+		// the caller of HandleConn.
+		go m.conn.Connect()
 	default:
 		return
 	}
@@ -137,7 +146,7 @@ func (m *monitoredPlugin) HandleConn(_ context.Context, stats grpcstats.ConnStat
 // The context can be used to cancel all background activities.
 // If desired, Stop can be called in addition or instead of canceling
 // the context. It then also waits for background activities to stop.
-func NewDRAPluginManager(ctx context.Context, kubeClient kubernetes.Interface, getNode func() (*v1.Node, error), streamHandler StreamHandler, wipingDelay time.Duration) *DRAPluginManager {
+func NewDRAPluginManager(ctx context.Context, kubeClient kubernetes.Interface, getNode func(context.Context) (*v1.Node, error), streamHandler StreamHandler, wipingDelay time.Duration) *DRAPluginManager {
 	ctx, cancel := context.WithCancelCause(ctx)
 	pm := &DRAPluginManager{
 		backgroundCtx: klog.NewContext(ctx, klog.LoggerWithName(klog.FromContext(ctx), "DRA registration handler")),
@@ -219,7 +228,7 @@ func (pm *DRAPluginManager) wipeResourceSlices(ctx context.Context, driver strin
 
 	// Error logging is done inside the loop. Context cancellation doesn't get logged.
 	_ = wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {
-		node, err := pm.getNode()
+		node, err := pm.getNode(ctx)
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
@@ -361,12 +370,15 @@ func (pm *DRAPluginManager) add(driverName string, endpoint string, chosenServic
 	// The gRPC connection gets created once. gRPC then connects to the gRPC server on demand.
 	target := "unix:" + endpoint
 	logger.V(4).Info("Creating new gRPC connection", "target", target)
-	conn, err := grpc.NewClient(
-		target,
+	options := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(newMetricsInterceptor(driverName)),
 		grpc.WithStatsHandler(mp),
-	)
+	}
+	if pm.withIdleTimeout > 0 {
+		options = append(options, grpc.WithIdleTimeout(pm.withIdleTimeout))
+	}
+	conn, err := grpc.NewClient(target, options...)
 	if err != nil {
 		return fmt.Errorf("create gRPC connection to DRA driver %s plugin at endpoint %s: %w", driverName, endpoint, err)
 	}
@@ -383,7 +395,7 @@ func (pm *DRAPluginManager) add(driverName string, endpoint string, chosenServic
 				logger.V(4).Info("Attempting to start WatchResources health stream")
 				stream, err := p.NodeWatchResources(ctx)
 				if err != nil {
-					logger.V(3).Error(err, "Failed to establish WatchResources stream, will retry")
+					logger.V(3).Info("Failed to establish WatchResources stream, will retry", "err", err)
 					return
 				}
 

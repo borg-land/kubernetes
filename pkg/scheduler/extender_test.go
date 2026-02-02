@@ -19,7 +19,6 @@ package scheduler
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/google/go-cmp/cmp"
 	v1 "k8s.io/api/core/v1"
@@ -325,7 +324,7 @@ func TestSchedulerWithExtenders(t *testing.T) {
 			client := clientsetfake.NewClientset()
 			informerFactory := informers.NewSharedInformerFactory(client, 0)
 
-			var extenders []framework.Extender
+			var extenders []fwk.Extender
 			for ii := range test.extenders {
 				extenders = append(extenders, &test.extenders[ii])
 			}
@@ -333,7 +332,7 @@ func TestSchedulerWithExtenders(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			cache := internalcache.New(ctx, time.Duration(0), nil)
+			cache := internalcache.New(ctx, nil)
 			for _, name := range test.nodes {
 				cache.AddNode(logger, createNode(name))
 			}
@@ -501,7 +500,7 @@ func TestConvertToVictims(t *testing.T) {
 		nodeNameToMetaVictims map[string]*extenderv1.MetaVictims
 		nodeNames             []string
 		podsInNodeList        []*v1.Pod
-		nodeInfos             framework.NodeInfoLister
+		nodeInfos             fwk.NodeInfoLister
 		want                  map[string]*extenderv1.Victims
 		wantErr               bool
 	}{

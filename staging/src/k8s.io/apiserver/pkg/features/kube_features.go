@@ -109,11 +109,39 @@ const (
 	// Allow the API server to serve consistent lists from cache
 	ConsistentListFromCache featuregate.Feature = "ConsistentListFromCache"
 
+	// owner: @enj @qiujian16
+	// kep: https://kep.k8s.io/5284
+	//
+	// Enables impersonation that is constrained to specific requests instead of being all or nothing.
+	ConstrainedImpersonation featuregate.Feature = "ConstrainedImpersonation"
+
 	// owner: @jefftree
 	// kep: https://kep.k8s.io/4355
 	//
 	// Enables coordinated leader election in the API server
 	CoordinatedLeaderElection featuregate.Feature = "CoordinatedLeaderElection"
+
+	// owner: @jpbetz @aaron-prindle @yongruilin
+	// kep: http://kep.k8s.io/5073
+	// beta: v1.33
+	//
+	// Enables running declarative validation of APIs, where declared. When enabled, APIs with
+	// declarative validation rules will validate objects using the generated
+	// declarative validation code and compare the results to the regular imperative validation.
+	// See DeclarativeValidationTakeover for more.
+	DeclarativeValidation featuregate.Feature = "DeclarativeValidation"
+
+	// owner: @jpbetz @aaron-prindle @yongruilin
+	// kep: http://kep.k8s.io/5073
+	// beta: v1.33
+	//
+	// When enabled, declarative validation errors are returned directly to the caller,
+	// replacing hand-written validation errors for rules that have declarative implementations.
+	// When disabled, hand-written validation errors are always returned, effectively putting
+	// declarative validation in a "shadow mode" that monitors but does not affect API responses.
+	// Note: Although declarative validation aims for functional equivalence with hand-written validation,
+	// the exact number, format, and content of error messages may differ between the two approaches.
+	DeclarativeValidationTakeover featuregate.Feature = "DeclarativeValidationTakeover"
 
 	// owner: @serathius
 	// kep: https://kep.k8s.io/4988
@@ -195,22 +223,6 @@ const (
 	// Allow API server Protobuf encoder to encode collections item by item, instead of all at once.
 	StreamingCollectionEncodingToProtobuf featuregate.Feature = "StreamingCollectionEncodingToProtobuf"
 
-	// owner: @cici37
-	//
-	// StrictCostEnforcementForVAP is used to apply strict CEL cost validation for ValidatingAdmissionPolicy.
-	// It will be set to off by default for certain time of period to prevent the impact on the existing users.
-	// It is strongly recommended to enable this feature gate as early as possible.
-	// The strict cost is specific for the extended libraries whose cost defined under k8s/apiserver/pkg/cel/library.
-	StrictCostEnforcementForVAP featuregate.Feature = "StrictCostEnforcementForVAP"
-
-	// owner: @cici37
-	//
-	// StrictCostEnforcementForWebhooks is used to apply strict CEL cost validation for matchConditions in Webhooks.
-	// It will be set to off by default for certain time of period to prevent the impact on the existing users.
-	// It is strongly recommended to enable this feature gate as early as possible.
-	// The strict cost is specific for the extended libraries whose cost defined under k8s/apiserver/pkg/cel/library.
-	StrictCostEnforcementForWebhooks featuregate.Feature = "StrictCostEnforcementForWebhooks"
-
 	// owner: @aramase, @enj, @nabokihms
 	// kep: https://kep.k8s.io/3331
 	//
@@ -223,11 +235,11 @@ const (
 	// Enables Egress Selector in Structured Authentication Configuration
 	StructuredAuthenticationConfigurationEgressSelector featuregate.Feature = "StructuredAuthenticationConfigurationEgressSelector"
 
-	// owner: @palnabarun
-	// kep: https://kep.k8s.io/3221
+	// owner: @aramase, @enj, @nabokihms
+	// kep: https://kep.k8s.io/3331
 	//
-	// Enables Structured Authorization Configuration
-	StructuredAuthorizationConfiguration featuregate.Feature = "StructuredAuthorizationConfiguration"
+	// Enables JWKs metrics for Structured Authentication Configuration
+	StructuredAuthenticationConfigurationJWKSMetrics featuregate.Feature = "StructuredAuthenticationConfigurationJWKSMetrics"
 
 	// owner: @aramase
 	//
@@ -256,15 +268,15 @@ const (
 	// clients.
 	UnauthenticatedHTTP2DOSMitigation featuregate.Feature = "UnauthenticatedHTTP2DOSMitigation"
 
+	// owner: @richabanker
+	//
+	// Proxies client to an apiserver capable of serving the request in the event of version skew.
+	UnknownVersionInteroperabilityProxy featuregate.Feature = "UnknownVersionInteroperabilityProxy"
+
 	// owner: @wojtek-t
 	//
 	// Enables post-start-hook for storage readiness
 	WatchCacheInitializationPostStartHook featuregate.Feature = "WatchCacheInitializationPostStartHook"
-
-	// owner: @serathius
-	// Enables watches without resourceVersion to be served from storage.
-	// Used to prevent https://github.com/kubernetes/kubernetes/issues/123072 until etcd fixes the issue.
-	WatchFromStorageWithoutResourceVersion featuregate.Feature = "WatchFromStorageWithoutResourceVersion"
 
 	// owner: @p0lyn0mial
 	//
@@ -307,6 +319,7 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 	AggregatedDiscoveryRemoveBetaType: {
 		{Version: version.MustParse("1.0"), Default: false, PreRelease: featuregate.GA},
 		{Version: version.MustParse("1.33"), Default: true, PreRelease: featuregate.Deprecated},
+		{Version: version.MustParse("1.35"), Default: true, PreRelease: featuregate.Deprecated, LockToDefault: true},
 	},
 
 	AllowParsingUserUIDFromCertAuth: {
@@ -348,8 +361,21 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 		{Version: version.MustParse("1.34"), Default: true, PreRelease: featuregate.GA, LockToDefault: true},
 	},
 
+	ConstrainedImpersonation: {
+		{Version: version.MustParse("1.35"), Default: false, PreRelease: featuregate.Alpha},
+	},
+
 	CoordinatedLeaderElection: {
 		{Version: version.MustParse("1.31"), Default: false, PreRelease: featuregate.Alpha},
+		{Version: version.MustParse("1.33"), Default: false, PreRelease: featuregate.Beta},
+	},
+
+	DeclarativeValidation: {
+		{Version: version.MustParse("1.33"), Default: true, PreRelease: featuregate.Beta},
+		{Version: version.MustParse("1.36"), Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // GA and LockToDefault in 1.36, remove in 1.39
+	},
+
+	DeclarativeValidationTakeover: {
 		{Version: version.MustParse("1.33"), Default: false, PreRelease: featuregate.Beta},
 	},
 
@@ -422,16 +448,6 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 		{Version: version.MustParse("1.34"), Default: true, PreRelease: featuregate.GA, LockToDefault: true},
 	},
 
-	StrictCostEnforcementForVAP: {
-		{Version: version.MustParse("1.30"), Default: false, PreRelease: featuregate.Beta},
-		{Version: version.MustParse("1.32"), Default: true, PreRelease: featuregate.GA, LockToDefault: true},
-	},
-
-	StrictCostEnforcementForWebhooks: {
-		{Version: version.MustParse("1.30"), Default: false, PreRelease: featuregate.Beta},
-		{Version: version.MustParse("1.32"), Default: true, PreRelease: featuregate.GA, LockToDefault: true},
-	},
-
 	StructuredAuthenticationConfiguration: {
 		{Version: version.MustParse("1.29"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("1.30"), Default: true, PreRelease: featuregate.Beta},
@@ -442,10 +458,8 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 		{Version: version.MustParse("1.34"), Default: true, PreRelease: featuregate.Beta},
 	},
 
-	StructuredAuthorizationConfiguration: {
-		{Version: version.MustParse("1.29"), Default: false, PreRelease: featuregate.Alpha},
-		{Version: version.MustParse("1.30"), Default: true, PreRelease: featuregate.Beta},
-		{Version: version.MustParse("1.32"), Default: true, PreRelease: featuregate.GA, LockToDefault: true},
+	StructuredAuthenticationConfigurationJWKSMetrics: {
+		{Version: version.MustParse("1.35"), Default: true, PreRelease: featuregate.Beta},
 	},
 
 	TokenRequestServiceAccountUIDValidation: {
@@ -457,13 +471,13 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 		{Version: version.MustParse("1.29"), Default: true, PreRelease: featuregate.Beta},
 	},
 
-	WatchCacheInitializationPostStartHook: {
-		{Version: version.MustParse("1.31"), Default: false, PreRelease: featuregate.Beta},
+	UnknownVersionInteroperabilityProxy: {
+		{Version: version.MustParse("1.28"), Default: false, PreRelease: featuregate.Alpha},
 	},
 
-	WatchFromStorageWithoutResourceVersion: {
-		{Version: version.MustParse("1.27"), Default: false, PreRelease: featuregate.Beta},
-		{Version: version.MustParse("1.33"), Default: false, PreRelease: featuregate.Deprecated, LockToDefault: true},
+	WatchCacheInitializationPostStartHook: {
+		{Version: version.MustParse("1.31"), Default: false, PreRelease: featuregate.Beta},
+		{Version: version.MustParse("1.36"), Default: true, PreRelease: featuregate.Beta},
 	},
 
 	WatchList: {

@@ -1,5 +1,4 @@
 //go:build !windows
-// +build !windows
 
 /*
 Copyright 2022 The Kubernetes Authors.
@@ -33,6 +32,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/klog/v2"
 	pkgfeatures "k8s.io/kubernetes/pkg/features"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/test/utils/ktesting"
@@ -78,7 +78,7 @@ func (m *testUserNsPodsManager) HandlerSupportsUserNamespaces(runtimeHandler str
 	return m.userns, nil
 }
 
-func (m *testUserNsPodsManager) GetKubeletMappings() (uint32, uint32, error) {
+func (m *testUserNsPodsManager) GetKubeletMappings(logger klog.Logger, idsPerPod uint32) (uint32, uint32, error) {
 	if m.mappingFirstID != 0 {
 		return m.mappingFirstID, m.mappingLen, nil
 	}
@@ -91,13 +91,6 @@ func (m *testUserNsPodsManager) GetMaxPods() int {
 	}
 
 	return testMaxPods
-}
-
-func (m *testUserNsPodsManager) GetUserNamespacesIDsPerPod() uint32 {
-	if m.userNsLength != 0 {
-		return m.userNsLength
-	}
-	return testUserNsLength
 }
 
 func TestUserNsManagerAllocate(t *testing.T) {
@@ -133,7 +126,8 @@ func TestUserNsManagerAllocate(t *testing.T) {
 				mappingFirstID: tc.mappingFirstID,
 				mappingLen:     tc.mappingLen,
 			}
-			m, err := MakeUserNsManager(logger, testUserNsPodsManager)
+			idsPerPod := int64(tc.userNsLength)
+			m, err := MakeUserNsManager(logger, testUserNsPodsManager, &idsPerPod)
 			require.NoError(t, err)
 
 			allocated, length, err := m.allocateOne(logger, "one")
@@ -226,7 +220,7 @@ func TestMakeUserNsManager(t *testing.T) {
 				mappingLen:     tc.mappingLen,
 				maxPods:        tc.maxPods,
 			}
-			_, err := MakeUserNsManager(logger, testUserNsPodsManager)
+			_, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 
 			if tc.success {
 				assert.NoError(t, err)
@@ -305,7 +299,7 @@ func TestUserNsManagerParseUserNsFile(t *testing.T) {
 	}
 
 	testUserNsPodsManager := &testUserNsPodsManager{}
-	m, err := MakeUserNsManager(logger, testUserNsPodsManager)
+	m, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 	assert.NoError(t, err)
 
 	for _, tc := range cases {
@@ -391,16 +385,16 @@ func TestGetOrCreateUserNamespaceMappings(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			logger, _ := ktesting.NewTestContext(t)
 			// These tests will create the userns file, so use an existing podDir.
 			testUserNsPodsManager := &testUserNsPodsManager{
 				podDir: t.TempDir(),
 				userns: tc.runtimeUserns,
 			}
-			logger, ctx := ktesting.NewTestContext(t)
-			m, err := MakeUserNsManager(logger, testUserNsPodsManager)
+			m, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 			assert.NoError(t, err)
 
-			userns, err := m.GetOrCreateUserNamespaceMappings(ctx, tc.pod, tc.runtimeHandler)
+			userns, err := m.GetOrCreateUserNamespaceMappings(logger, tc.pod, tc.runtimeHandler)
 			if (tc.success && err != nil) || (!tc.success && err == nil) {
 				t.Errorf("expected success: %v but got error: %v", tc.success, err)
 			}
@@ -470,7 +464,7 @@ func TestCleanupOrphanedPodUsernsAllocations(t *testing.T) {
 				podDir:  t.TempDir(),
 				podList: tc.listPods,
 			}
-			m, err := MakeUserNsManager(logger, testUserNsPodsManager)
+			m, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 			require.NoError(t, err)
 
 			// Record the userns range as used
@@ -508,7 +502,7 @@ func TestMakeUserNsManagerFailsListPod(t *testing.T) {
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.UserNamespacesSupport, true)
 
 	testUserNsPodsManager := &failingUserNsPodsManager{}
-	_, err := MakeUserNsManager(logger, testUserNsPodsManager)
+	_, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "read pods from disk")
 }
@@ -523,7 +517,7 @@ func TestRecordBounds(t *testing.T) {
 		mappingLen:     65536,
 		maxPods:        1,
 	}
-	m, err := MakeUserNsManager(logger, testUserNsPodsManager)
+	m, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 	require.NoError(t, err)
 
 	// The first pod allocation should succeed.

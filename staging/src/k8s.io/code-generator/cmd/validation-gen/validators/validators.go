@@ -247,30 +247,72 @@ type ListSelectorTerm struct {
 	Value any
 }
 
+// StabilityLevel indicates the stability of a validation tag.
+type StabilityLevel string
+
+const (
+	// Alpha indicates that a tag's semantics may change in the future.
+	Alpha StabilityLevel = "Alpha"
+	// Beta indicates that a tag's semantics will remain unchanged for the
+	// foreseeable future. This is used for soaking tags before qualifying to stable.
+	Beta StabilityLevel = "Beta"
+	// Stable indicates that a tag's semantics will remain unchanged for the
+	// foreseeable future.
+	Stable StabilityLevel = "Stable"
+)
+
+var stabilityOrder = map[StabilityLevel]int{
+	Alpha:  0,
+	Beta:   1,
+	Stable: 2,
+}
+
+// Min returns the minimum of two stability levels, or an error if either
+// stability level is unknown.
+func (s StabilityLevel) Min(other StabilityLevel) (StabilityLevel, error) {
+	sOrder, okS := stabilityOrder[s]
+	if !okS {
+		return "", fmt.Errorf("unknown stability level %q", s)
+	}
+	otherOrder, okOther := stabilityOrder[other]
+	if !okOther {
+		return "", fmt.Errorf("unknown stability level %q", other)
+	}
+
+	if sOrder < otherOrder {
+		return s, nil
+	}
+	return other, nil
+}
+
 // TagDoc describes a comment-tag and its usage.
 type TagDoc struct {
 	// Tag is the tag name, without the leading '+'.
 	Tag string
+	// StabilityLevel is the stability level of the tag.
+	StabilityLevel StabilityLevel
 	// Args lists any arguments this tag might take.
-	Args []TagArgDoc
+	Args []TagArgDoc `json:",omitempty"`
 	// Usage is how the tag is used, including arguments.
 	Usage string
 	// Description is a short description of this tag's purpose.
 	Description string
 	// Docs is a human-oriented string explaining this tag.
 	Docs string
+	// Warning is an optional warning about this tag.
+	Warning string `json:",omitempty"`
 	// Scopes lists the place or places this tag may be used.
 	Scopes []Scope
 	// Payloads lists zero or more varieties of value for this tag. If this tag
 	// never has a payload, this list should be empty, but if the payload is
 	// optional, this list should include an entry for "<none>".
-	Payloads []TagPayloadDoc
+	Payloads []TagPayloadDoc `json:",omitempty"`
 	// PayloadsType is the type of the payloads.
-	PayloadsType codetags.ValueType
+	PayloadsType codetags.ValueType `json:",omitempty"`
 	// PayloadsRequired is true if a payload is required.
-	PayloadsRequired bool
+	PayloadsRequired bool `json:",omitempty"`
 	// AcceptsUnknownArgs is true if unknown args are accepted
-	AcceptsUnknownArgs bool
+	AcceptsUnknownArgs bool `json:",omitempty"`
 }
 
 func (td TagDoc) Arg(name string) (TagArgDoc, bool) {
@@ -399,13 +441,19 @@ const (
 	DefaultFlags FunctionFlags = 0
 
 	// ShortCircuit indicates that further validations should be skipped if
-	// this validator fails. Most validators are not fatal.
+	// this validator fails. If there are multiple validators with this flag
+	// set, they will ALL run, and if any of them fail, any non-short-circuit
+	// validators will be skipped.  Most validators are not fatal.
 	ShortCircuit FunctionFlags = 1 << iota
 
 	// NonError indicates that a failure of this validator should not be
 	// accumulated as an error, but should trigger other aspects of the failure
 	// path (e.g. early return when combined with ShortCircuit).
 	NonError
+
+	// DeclarativeNative indicates that the validation function returns an error
+	// list which should be marked as declarative-native.
+	DeclarativeNative
 )
 
 // Conditions defines what conditions must be true for a resource to be validated.
@@ -444,6 +492,10 @@ func Function(tagName string, flags FunctionFlags, function types.Name, extraArg
 type FunctionGen struct {
 	// TagName is the tag which triggered this function.
 	TagName string
+
+	// Cohort indicates a set of related functions which are processed
+	// together.
+	Cohort string
 
 	// Flags holds the options for this validator function.
 	Flags FunctionFlags
@@ -489,10 +541,15 @@ func (fg FunctionGen) WithConditions(conditions Conditions) FunctionGen {
 	return fg
 }
 
+// WithComments returns a new FunctionGen with a comment.
+func (fg FunctionGen) WithComments(comments ...string) FunctionGen {
+	fg.Comments = append(fg.Comments, comments...)
+	return fg
+}
+
 // WithComment returns a new FunctionGen with a comment.
 func (fg FunctionGen) WithComment(comment string) FunctionGen {
-	fg.Comments = append(fg.Comments, comment)
-	return fg
+	return fg.WithComments(comment)
 }
 
 // Variable creates a VariableGen for a given variable name and init value.

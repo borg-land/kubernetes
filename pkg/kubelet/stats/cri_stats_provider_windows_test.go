@@ -32,6 +32,7 @@ import (
 	kubecontainertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	"k8s.io/kubernetes/pkg/kubelet/kuberuntime"
 	"k8s.io/kubernetes/pkg/volume"
+	"k8s.io/kubernetes/test/utils/ktesting"
 	testingclock "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 )
@@ -423,6 +424,7 @@ func Test_criStatsProvider_listContainerNetworkStats(t *testing.T) {
 			skipped: true,
 		},
 	}
+	logger, _ := ktesting.NewTestContext(t)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// TODO: Remove skip once https://github.com/kubernetes/kubernetes/issues/116692 is fixed.
@@ -435,7 +437,7 @@ func Test_criStatsProvider_listContainerNetworkStats(t *testing.T) {
 				},
 				clock: fakeClock,
 			}
-			got, err := p.listContainerNetworkStats()
+			got, err := p.listContainerNetworkStats(logger)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("listContainerNetworkStats() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -457,6 +459,7 @@ func Test_criStatsProvider_makeWinContainerStats(t *testing.T) {
 	memoryUsageTimestamp := int64(666666)
 	memoryUsageWorkingSetBytes := uint64(0x11223344)
 	memoryUsageAvailableBytes := uint64(0x55667788)
+	memoryCommitBytes := uint64(0x99AABBCC)
 	memoryUsagePageFaults := uint64(200)
 	logStatsUsed := uint64(5000)
 	logStatsInodesUsed := uint64(5050)
@@ -500,6 +503,9 @@ func Test_criStatsProvider_makeWinContainerStats(t *testing.T) {
 			WorkingSetBytes: &runtimeapi.UInt64Value{
 				Value: memoryUsageWorkingSetBytes,
 			},
+			CommitMemoryBytes: &runtimeapi.UInt64Value{
+				Value: memoryCommitBytes,
+			},
 			PageFaults: &runtimeapi.UInt64Value{
 				Value: memoryUsagePageFaults,
 			},
@@ -522,7 +528,8 @@ func Test_criStatsProvider_makeWinContainerStats(t *testing.T) {
 		Uid:       "sb0-uid",
 	}
 
-	got, err := p.makeWinContainerStats(inputStats, inputContainer, inputRootFsInfo, make(map[string]*cadvisorapiv2.FsInfo), inputPodSandboxMetadata)
+	logger, _ := ktesting.NewTestContext(t)
+	got, err := p.makeWinContainerStats(logger, inputStats, inputContainer, inputRootFsInfo, make(map[string]*cadvisorapiv2.FsInfo), inputPodSandboxMetadata)
 
 	expected := &statsapi.ContainerStats{
 		Name:      "c0",
@@ -535,6 +542,7 @@ func Test_criStatsProvider_makeWinContainerStats(t *testing.T) {
 		Memory: &statsapi.MemoryStats{
 			Time:            v1.NewTime(time.Unix(0, memoryUsageTimestamp)),
 			AvailableBytes:  ptr.To[uint64](memoryUsageAvailableBytes),
+			UsageBytes:      ptr.To[uint64](memoryCommitBytes),
 			WorkingSetBytes: ptr.To[uint64](memoryUsageWorkingSetBytes),
 			PageFaults:      ptr.To[uint64](memoryUsagePageFaults),
 		},

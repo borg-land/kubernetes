@@ -45,6 +45,10 @@ import (
 func TestCreateServiceSingleStackIPv4(t *testing.T) {
 	for _, enableMultiServiceCIDR := range []bool{false, true} {
 		for _, disableAllocatorDualWrite := range []bool{false, true} {
+			if !enableMultiServiceCIDR && disableAllocatorDualWrite {
+				// Inavlid configuration: DisableAllocatorDualWrite depends on MultiServiceCIDR
+				continue
+			}
 			t.Run(fmt.Sprintf("MultiServiceCIDR=%v DisableAllocatorDualWrite=%v", enableMultiServiceCIDR, disableAllocatorDualWrite), func(t *testing.T) {
 				// Create an IPv4 single stack control-plane
 				tCtx := ktesting.Init(t)
@@ -236,7 +240,6 @@ func TestCreateServiceSingleStackIPv4(t *testing.T) {
 				}
 
 				for i, tc := range testcases {
-					tc := tc
 					t.Run(tc.name, func(t *testing.T) {
 
 						svc := &v1.Service{
@@ -292,6 +295,10 @@ func TestCreateServiceSingleStackIPv4(t *testing.T) {
 func TestCreateServiceSingleStackIPv6(t *testing.T) {
 	for _, enableMultiServiceCIDR := range []bool{false, true} {
 		for _, disableAllocatorDualWrite := range []bool{false, true} {
+			if !enableMultiServiceCIDR && disableAllocatorDualWrite {
+				// Inavlid configuration: DisableAllocatorDualWrite depends on MultiServiceCIDR
+				continue
+			}
 			t.Run(fmt.Sprintf("MultiServiceCIDR=%v DisableAllocatorDualWrite=%v", enableMultiServiceCIDR, disableAllocatorDualWrite), func(t *testing.T) {
 				// Create an IPv6 only control-plane
 				tCtx := ktesting.Init(t)
@@ -475,7 +482,6 @@ func TestCreateServiceSingleStackIPv6(t *testing.T) {
 				}
 
 				for i, tc := range testcases {
-					tc := tc
 					t.Run(tc.name, func(t *testing.T) {
 
 						svc := &v1.Service{
@@ -526,6 +532,10 @@ func TestCreateServiceSingleStackIPv6(t *testing.T) {
 func TestCreateServiceDualStackIPv4IPv6(t *testing.T) {
 	for _, enableMultiServiceCIDR := range []bool{false, true} {
 		for _, disableAllocatorDualWrite := range []bool{false, true} {
+			if !enableMultiServiceCIDR && disableAllocatorDualWrite {
+				// Inavlid configuration: DisableAllocatorDualWrite depends on MultiServiceCIDR
+				continue
+			}
 			t.Run(fmt.Sprintf("MultiServiceCIDR=%v DisableAllocatorDualWrite=%v", enableMultiServiceCIDR, disableAllocatorDualWrite), func(t *testing.T) {
 				// Create an IPv4IPv6 dual stack control-plane
 				tCtx := ktesting.Init(t)
@@ -751,7 +761,6 @@ func TestCreateServiceDualStackIPv4IPv6(t *testing.T) {
 				}
 
 				for i, tc := range testcases {
-					tc := tc
 					t.Run(tc.name, func(t *testing.T) {
 
 						svc := &v1.Service{
@@ -808,6 +817,10 @@ func TestCreateServiceDualStackIPv4IPv6(t *testing.T) {
 func TestCreateServiceDualStackIPv6IPv4(t *testing.T) {
 	for _, enableMultiServiceCIDR := range []bool{false, true} {
 		for _, disableAllocatorDualWrite := range []bool{false, true} {
+			if !enableMultiServiceCIDR && disableAllocatorDualWrite {
+				// Inavlid configuration: DisableAllocatorDualWrite depends on MultiServiceCIDR
+				continue
+			}
 			t.Run(fmt.Sprintf("MultiServiceCIDR=%v DisableAllocatorDualWrite=%v", enableMultiServiceCIDR, disableAllocatorDualWrite), func(t *testing.T) {
 				// Create an IPv6IPv4 dual stack control-plane
 				tCtx := ktesting.Init(t)
@@ -995,7 +1008,6 @@ func TestCreateServiceDualStackIPv6IPv4(t *testing.T) {
 				}
 
 				for i, tc := range testcases {
-					tc := tc
 					t.Run(tc.name, func(t *testing.T) {
 
 						svc := &v1.Service{

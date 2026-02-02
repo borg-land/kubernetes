@@ -41,6 +41,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	clientfeatures "k8s.io/client-go/features"
 	"k8s.io/client-go/tools/pager"
+	"k8s.io/client-go/util/watchlist"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
 	"k8s.io/utils/ptr"
@@ -78,7 +79,7 @@ type ReflectorStore interface {
 // TransformingStore is an optional interface that can be implemented by the provided store.
 // If implemented on the provided store reflector will use the same transformer in its internal stores.
 type TransformingStore interface {
-	Store
+	ReflectorStore
 	Transformer() TransformFunc
 }
 
@@ -297,6 +298,15 @@ func NewReflectorWithOptions(lw ListerWatcher, expectedType interface{}, store R
 	}
 
 	r.useWatchList = clientfeatures.FeatureGates().Enabled(clientfeatures.WatchListClient)
+	if r.useWatchList && watchlist.DoesClientNotSupportWatchListSemantics(lw) {
+		// Using klog.TODO() here because switching to a caller-provided contextual logger
+		// would require an API change and updating all existing call sites.
+		klog.TODO().V(2).Info(
+			"The client used to build this informer/reflector doesn't support WatchList semantics. The feature will be disabled. This is expected in unit tests but not in production. For details, see the documentation of watchlist.DoesClientNotSupportWatchListSemantics().",
+			"feature", clientfeatures.WatchListClient,
+		)
+		r.useWatchList = false
+	}
 
 	return r
 }
@@ -415,7 +425,10 @@ func (r *Reflector) ListAndWatchWithContext(ctx context.Context) error {
 			return nil
 		}
 		if err != nil {
-			logger.Error(err, "The watchlist request ended with an error, falling back to the standard LIST/WATCH semantics because making progress is better than deadlocking")
+			logger.V(4).Info(
+				"Data couldn't be fetched in watchlist mode. Falling back to regular list. This is expected if watchlist is not supported or disabled in kube-apiserver.",
+				"err", err,
+			)
 			fallbackToList = true
 			// ensure that we won't accidentally pass some garbage down the watch.
 			w = nil
@@ -507,6 +520,8 @@ func (r *Reflector) watch(ctx context.Context, w watch.Interface, resyncerrc cha
 		// start the clock before sending the request, since some proxies won't flush headers until after the first watch event is sent
 		start := r.clock.Now()
 
+		// if w is already initialized, it must be past any synthetic non-rv-ordered added events
+		propagateRVFromStart := true
 		if w == nil {
 			timeoutSeconds := int64(r.minWatchTimeout.Seconds() * (rand.Float64() + 1.0))
 			options := metav1.ListOptions{
@@ -518,6 +533,11 @@ func (r *Reflector) watch(ctx context.Context, w watch.Interface, resyncerrc cha
 				// Reflector doesn't assume bookmarks are returned at all (if the server do not support
 				// watch bookmarks, it will ignore this field).
 				AllowWatchBookmarks: true,
+			}
+			if options.ResourceVersion == "" || options.ResourceVersion == "0" {
+				// if we're starting the watch at a resource version that will get synthetic ADDED events in non-rv order,
+				// wait until we're through that set of events before propagating the RV
+				propagateRVFromStart = false
 			}
 
 			w, err = r.listerWatcher.WatchWithContext(ctx, options)
@@ -535,7 +555,25 @@ func (r *Reflector) watch(ctx context.Context, w watch.Interface, resyncerrc cha
 			}
 		}
 
-		err = handleWatch(ctx, start, w, r.store, r.expectedType, r.expectedGVK, r.name, r.typeDescription, r.setLastSyncResourceVersion,
+		err = handleWatch(ctx, start, w, r.store, r.expectedType, r.expectedGVK, r.name, r.typeDescription,
+			func(rv string, eventReceivedBesidesAdded bool) {
+				// We update the resource version in the store only if we have received at least one event that is
+				// not an added event, or if the resource version has been set previously. This is because we can
+				// encounter 2 scenarios:
+				// 1. The watch is started from a resource version specified by the LastSyncResourceVersion field.
+				//    In this case, we can update the resource version in the store without worrying about it being
+				//    out of order since we will not receive any synthetic added events for resources that may be
+				//    out of order.
+				// 2. The watch is started when the LastSyncResourceVersion field is empty. In this case, we may not
+				//    update the LastSyncResourceVersion until we receive at least one event that is not an added
+				//    event, since that is the only way to ensure that the watch has exited the initial list phase.
+				if propagateRVFromStart || eventReceivedBesidesAdded {
+					r.setLastSyncResourceVersion(rv)
+					if rvu, ok := r.store.(ResourceVersionUpdater); ok {
+						rvu.UpdateResourceVersion(rv)
+					}
+				}
+			},
 			r.clock, resyncerrc)
 		// handleWatch always stops the watcher. So we don't need to here.
 		// Just set it to nil to trigger a retry on the next loop.
@@ -722,9 +760,11 @@ func (r *Reflector) watchList(ctx context.Context) (watch.Interface, error) {
 		return false
 	}
 
+	var transformer TransformFunc
 	storeOpts := []StoreOption{}
 	if tr, ok := r.store.(TransformingStore); ok && tr.Transformer() != nil {
-		storeOpts = append(storeOpts, WithTransformer(tr.Transformer()))
+		transformer = tr.Transformer()
+		storeOpts = append(storeOpts, WithTransformer(transformer))
 	}
 
 	initTrace := trace.New("Reflector WatchList", trace.Field{Key: "name", Value: r.name})
@@ -760,7 +800,11 @@ func (r *Reflector) watchList(ctx context.Context) (watch.Interface, error) {
 			return nil, err
 		}
 		watchListBookmarkReceived, err := handleListWatch(ctx, start, w, temporaryStore, r.expectedType, r.expectedGVK, r.name, r.typeDescription,
-			func(rv string) { resourceVersion = rv },
+			func(rv string, eventReceivedBesidesAdded bool) {
+				if eventReceivedBesidesAdded {
+					resourceVersion = rv
+				}
+			},
 			r.clock, make(chan error))
 		if err != nil {
 			w.Stop() // stop and retry with clean state
@@ -784,7 +828,7 @@ func (r *Reflector) watchList(ctx context.Context) (watch.Interface, error) {
 	// we utilize the temporaryStore to ensure independence from the current store implementation.
 	// as of today, the store is implemented as a queue and will be drained by the higher-level
 	// component as soon as it finishes replacing the content.
-	checkWatchListDataConsistencyIfRequested(ctx, r.name, resourceVersion, r.listerWatcher.ListWithContext, temporaryStore.List)
+	checkWatchListDataConsistencyIfRequested(ctx, r.name, resourceVersion, r.listerWatcher.ListWithContext, transformer, temporaryStore.List)
 
 	if err := r.store.Replace(temporaryStore.List(), resourceVersion); err != nil {
 		return nil, fmt.Errorf("unable to sync watch-list result: %w", err)
@@ -817,7 +861,7 @@ func handleListWatch(
 	expectedGVK *schema.GroupVersionKind,
 	name string,
 	expectedTypeName string,
-	setLastSyncResourceVersion func(string),
+	setLastSyncResourceVersion func(string, bool),
 	clock clock.Clock,
 	errCh chan error,
 ) (bool, error) {
@@ -838,7 +882,7 @@ func handleWatch(
 	expectedGVK *schema.GroupVersionKind,
 	name string,
 	expectedTypeName string,
-	setLastSyncResourceVersion func(string),
+	setLastSyncResourceVersion func(string, bool),
 	clock clock.Clock,
 	errCh chan error,
 ) error {
@@ -866,12 +910,13 @@ func handleAnyWatch(
 	expectedGVK *schema.GroupVersionKind,
 	name string,
 	expectedTypeName string,
-	setLastSyncResourceVersion func(string),
+	setLastSyncResourceVersion func(string, bool),
 	exitOnWatchListBookmarkReceived bool,
 	clock clock.Clock,
 	errCh chan error,
 ) (bool, error) {
 	watchListBookmarkReceived := false
+	eventReceivedBesidesAdded := false
 	eventCount := 0
 	logger := klog.FromContext(ctx)
 	initialEventsEndBookmarkWarningTicker := newInitialEventsEndBookmarkTicker(logger, name, clock, start, exitOnWatchListBookmarkReceived)
@@ -931,6 +976,7 @@ loop:
 					utilruntime.HandleErrorWithContext(ctx, err, "Unable to add watch event object to store", "reflector", name, "object", event.Object)
 				}
 			case watch.Modified:
+				eventReceivedBesidesAdded = true
 				err := store.Update(event.Object)
 				if err != nil {
 					utilruntime.HandleErrorWithContext(ctx, err, "Unable to update watch event object to store", "reflector", name, "object", event.Object)
@@ -939,22 +985,22 @@ loop:
 				// TODO: Will any consumers need access to the "last known
 				// state", which is passed in event.Object? If so, may need
 				// to change this.
+				eventReceivedBesidesAdded = true
 				err := store.Delete(event.Object)
 				if err != nil {
 					utilruntime.HandleErrorWithContext(ctx, err, "Unable to delete watch event object from store", "reflector", name, "object", event.Object)
 				}
 			case watch.Bookmark:
 				// A `Bookmark` means watch has synced here, just update the resourceVersion
+				eventReceivedBesidesAdded = true
 				if meta.GetAnnotations()[metav1.InitialEventsAnnotationKey] == "true" {
 					watchListBookmarkReceived = true
 				}
 			default:
 				utilruntime.HandleErrorWithContext(ctx, err, "Unknown watch event", "reflector", name, "event", event)
 			}
-			setLastSyncResourceVersion(resourceVersion)
-			if rvu, ok := store.(ResourceVersionUpdater); ok {
-				rvu.UpdateResourceVersion(resourceVersion)
-			}
+			// when eventReceivedBesidesAdded is true, that indicates we are definitely past any initial synthetic Added events
+			setLastSyncResourceVersion(resourceVersion, eventReceivedBesidesAdded)
 			eventCount++
 			if exitOnWatchListBookmarkReceived && watchListBookmarkReceived {
 				stopWatcher = false

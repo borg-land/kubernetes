@@ -20,8 +20,12 @@ import (
 	"context"
 	"time"
 
+	"k8s.io/klog/v2"
 	kubeletconfiginternal "k8s.io/kubernetes/pkg/kubelet/apis/config"
 )
+
+// GetPodCredentials lazily looks up and returns a set of pull credentials.
+type GetPodCredentials func() ([]kubeletconfiginternal.ImagePullSecret, *kubeletconfiginternal.ImagePullServiceAccount, error)
 
 // ImagePullManager keeps the state of images that were pulled and which are
 // currently still being pulled.
@@ -36,7 +40,7 @@ type ImagePullManager interface {
 	// RecordPullIntent() must match exactly one call of RecordImagePulled()/RecordImagePullFailed().
 	//
 	// `image` is the content of the pod's container `image` field.
-	RecordPullIntent(image string) error
+	RecordPullIntent(logger klog.Logger, image string) error
 	// RecordImagePulled writes a record of an image being successfully pulled
 	// with ImagePullCredentials.
 	//
@@ -59,11 +63,16 @@ type ImagePullManager interface {
 	// set of credentials or if the image can be accessed by any of the node's pods
 	// or if the image can be accessed by the specified service account.
 	//
-	// Returns true if the policy demands verification and no record of the pull
+	// `getPodCredentials` is invoked to retrieve the set of credentials after
+	// MustAttemptImagePull evaluates the parts of the policy that do not depend on them.
+	//
+	// Returns true and an error if `getPodCredentials` returns an error.
+	//
+	// Returns true and nil if the policy demands verification and no record of the pull
 	// was found in the cache.
 	//
 	// `image` is the content of the pod's container `image` field.
-	MustAttemptImagePull(ctx context.Context, image, imageRef string, credentials []kubeletconfiginternal.ImagePullSecret, serviceAccount *kubeletconfiginternal.ImagePullServiceAccount) bool
+	MustAttemptImagePull(ctx context.Context, image, imageRef string, getPodCredentials GetPodCredentials) (bool, error)
 	// PruneUnknownRecords deletes all of the cache ImagePulledRecords for each of the images
 	// whose imageRef does not appear in the `imageList` iff such an record was last updated
 	// _before_ the `until` timestamp.
@@ -88,9 +97,9 @@ type PullRecordsAccessor interface {
 	// for the given image.
 	ImagePullIntentExists(image string) (bool, error)
 	// WriteImagePullIntent writes a an intent record for the image into the database
-	WriteImagePullIntent(image string) error
+	WriteImagePullIntent(logger klog.Logger, image string) error
 	// DeleteImagePullIntent removes an `image` intent record from the database
-	DeleteImagePullIntent(image string) error
+	DeleteImagePullIntent(logger klog.Logger, image string) error
 
 	// ListImagePulledRecords lists the database ImagePulledRecords.
 	// Records that cannot be decoded will be ignored.
@@ -105,8 +114,8 @@ type PullRecordsAccessor interface {
 	// it returns a exists=true with err equal to the decoding error.
 	GetImagePulledRecord(imageRef string) (record *kubeletconfiginternal.ImagePulledRecord, exists bool, err error)
 	// WriteImagePulledRecord writes an ImagePulledRecord into the database.
-	WriteImagePulledRecord(record *kubeletconfiginternal.ImagePulledRecord) error
+	WriteImagePulledRecord(logger klog.Logger, record *kubeletconfiginternal.ImagePulledRecord) error
 	// DeleteImagePulledRecord removes an ImagePulledRecord for `imageRef` from the
 	// database.
-	DeleteImagePulledRecord(imageRef string) error
+	DeleteImagePulledRecord(logger klog.Logger, imageRef string) error
 }

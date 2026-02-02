@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -302,9 +303,12 @@ func NewSharedIndexInformer(lw ListerWatcher, exampleObject runtime.Object, defa
 func NewSharedIndexInformerWithOptions(lw ListerWatcher, exampleObject runtime.Object, options SharedIndexInformerOptions) SharedIndexInformer {
 	realClock := &clock.RealClock{}
 
+	processor := &sharedProcessor{clock: realClock}
+	processor.listenersRCond = sync.NewCond(processor.listenersLock.RLocker())
+
 	return &sharedIndexInformer{
 		indexer:                         NewIndexer(DeletionHandlingMetaNamespaceKeyFunc, options.Indexers),
-		processor:                       &sharedProcessor{clock: realClock},
+		processor:                       processor,
 		listerWatcher:                   lw,
 		objectType:                      exampleObject,
 		objectDescription:               options.ObjectDescription,
@@ -312,6 +316,7 @@ func NewSharedIndexInformerWithOptions(lw ListerWatcher, exampleObject runtime.O
 		defaultEventHandlerResyncPeriod: options.ResyncPeriod,
 		clock:                           realClock,
 		cacheMutationDetector:           NewCacheMutationDetector(fmt.Sprintf("%T", exampleObject)),
+		keyFunc:                         DeletionHandlingMetaNamespaceKeyFunc,
 	}
 }
 
@@ -449,6 +454,9 @@ type sharedIndexInformer struct {
 	watchErrorHandler WatchErrorHandlerWithContext
 
 	transform TransformFunc
+
+	// keyFunc is called when processing deltas by the underlying process function.
+	keyFunc KeyFunc
 }
 
 // dummyController hides the fact that a SharedInformer is different from a dedicated one
@@ -539,16 +547,7 @@ func (s *sharedIndexInformer) RunWithContext(ctx context.Context) {
 		s.startedLock.Lock()
 		defer s.startedLock.Unlock()
 
-		var fifo Queue
-		if clientgofeaturegate.FeatureGates().Enabled(clientgofeaturegate.InOrderInformers) {
-			fifo = NewRealFIFO(MetaNamespaceKeyFunc, s.indexer, s.transform)
-		} else {
-			fifo = NewDeltaFIFOWithOptions(DeltaFIFOOptions{
-				KnownObjects:          s.indexer,
-				EmitDeltaTypeReplaced: true,
-				Transformer:           s.transform,
-			})
-		}
+		fifo := newQueueFIFO(s.indexer, s.transform)
 
 		cfg := &Config{
 			Queue:             fifo,
@@ -559,6 +558,7 @@ func (s *sharedIndexInformer) RunWithContext(ctx context.Context) {
 			ShouldResync:      s.processor.shouldResync,
 
 			Process:                      s.HandleDeltas,
+			ProcessBatch:                 s.HandleBatchDeltas,
 			WatchErrorHandlerWithContext: s.watchErrorHandler,
 		}
 
@@ -726,9 +726,15 @@ func (s *sharedIndexInformer) HandleDeltas(obj interface{}, isInInitialList bool
 	defer s.blockDeltas.Unlock()
 
 	if deltas, ok := obj.(Deltas); ok {
-		return processDeltas(s, s.indexer, deltas, isInInitialList)
+		return processDeltas(s, s.indexer, deltas, isInInitialList, s.keyFunc)
 	}
 	return errors.New("object given as Process argument is not Deltas")
+}
+
+func (s *sharedIndexInformer) HandleBatchDeltas(deltas []Delta, isInInitialList bool) error {
+	s.blockDeltas.Lock()
+	defer s.blockDeltas.Unlock()
+	return processDeltasInBatch(s, s.indexer, deltas, isInInitialList, s.keyFunc)
 }
 
 // Conforms to ResourceEventHandler
@@ -797,6 +803,7 @@ func (s *sharedIndexInformer) RemoveEventHandler(handle ResourceEventHandlerRegi
 type sharedProcessor struct {
 	listenersStarted bool
 	listenersLock    sync.RWMutex
+	listenersRCond   *sync.Cond // Caller of Wait must hold a read lock on listenersLock.
 	// Map from listeners to whether or not they are currently syncing
 	listeners map[*processorListener]bool
 	clock     clock.Clock
@@ -866,6 +873,14 @@ func (p *sharedProcessor) distribute(obj interface{}, sync bool) {
 	p.listenersLock.RLock()
 	defer p.listenersLock.RUnlock()
 
+	// Before we start blocking on writes to the listeners' channels,
+	// ensure that they all have been started. If the processor stops,
+	// p.listeners gets cleared, in which case we also continue here
+	// and return without doing anything.
+	for !p.listenersStarted && len(p.listeners) > 0 {
+		p.listenersRCond.Wait()
+	}
+
 	for listener, isSyncing := range p.listeners {
 		switch {
 		case !sync:
@@ -880,15 +895,25 @@ func (p *sharedProcessor) distribute(obj interface{}, sync bool) {
 	}
 }
 
+// sharedProcessorRunHook can be used inside tests to execute additional code
+// at the start of sharedProcessor.run.
+var sharedProcessorRunHook atomic.Pointer[func()]
+
 func (p *sharedProcessor) run(ctx context.Context) {
 	func() {
-		p.listenersLock.RLock()
-		defer p.listenersLock.RUnlock()
+		hook := sharedProcessorRunHook.Load()
+		if hook != nil {
+			(*hook)()
+		}
+		// Changing listenersStarted needs a write lock.
+		p.listenersLock.Lock()
+		defer p.listenersLock.Unlock()
 		for listener := range p.listeners {
 			p.wg.Start(listener.run)
 			p.wg.Start(listener.pop)
 		}
 		p.listenersStarted = true
+		p.listenersRCond.Signal()
 	}()
 	<-ctx.Done()
 
@@ -904,6 +929,9 @@ func (p *sharedProcessor) run(ctx context.Context) {
 
 	// Reset to false since no listeners are running
 	p.listenersStarted = false
+
+	// Wake up sharedProcessor.distribute.
+	p.listenersRCond.Signal()
 
 	p.wg.Wait() // Wait for all .pop() and .run() to stop
 }

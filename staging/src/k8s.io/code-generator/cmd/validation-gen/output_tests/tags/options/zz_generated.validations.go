@@ -37,6 +37,7 @@ func init() { localSchemeBuilder.Register(RegisterValidations) }
 // RegisterValidations adds validation functions to the given scheme.
 // Public to allow building arbitrary schemes.
 func RegisterValidations(scheme *testscheme.Scheme) error {
+	// type Struct
 	scheme.AddValidationFunc((*Struct)(nil), func(ctx context.Context, op operation.Operation, obj, oldObj interface{}) field.ErrorList {
 		switch op.Request.SubresourcePath() {
 		case "/":
@@ -47,77 +48,91 @@ func RegisterValidations(scheme *testscheme.Scheme) error {
 	return nil
 }
 
+// Validate_Struct validates an instance of Struct according
+// to declarative validation rules in the API schema.
 func Validate_Struct(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *Struct) (errs field.ErrorList) {
 	// field Struct.TypeMeta has no validation
 
 	// field Struct.ObjectMeta
 	errs = append(errs,
-		func(fldPath *field.Path, obj, oldObj *ObjectMeta) (errs field.ErrorList) {
-			if op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
-				return nil // no changes
+		func(fldPath *field.Path, obj, oldObj *ObjectMeta, oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
+				return nil
 			}
+			// call field-attached validations
 			errs = append(errs, validate.IfOption(ctx, op, fldPath, obj, oldObj, "FeatureX", true, func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *ObjectMeta) field.ErrorList {
-				return validate.Subfield(ctx, op, fldPath, obj, oldObj, "xEnabledField", func(o *ObjectMeta) *string { return &o.XEnabledField }, func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *string) field.ErrorList {
+				return validate.Subfield(ctx, op, fldPath, obj, oldObj, "xEnabledField", func(o *ObjectMeta) *string { return &o.XEnabledField }, validate.DirectEqualPtr, func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *string) field.ErrorList {
 					return validate.FixedResult(ctx, op, fldPath, obj, oldObj, false, "field Struct.ObjectMeta.XEnabledField")
 				})
 			})...)
 			return
-		}(fldPath.Child("metadata"), &obj.ObjectMeta, safe.Field(oldObj, func(oldObj *Struct) *ObjectMeta { return &oldObj.ObjectMeta }))...)
+		}(fldPath.Child("metadata"), &obj.ObjectMeta, safe.Field(oldObj, func(oldObj *Struct) *ObjectMeta { return &oldObj.ObjectMeta }), oldObj != nil)...)
 
 	// field Struct.XEnabledField
 	errs = append(errs,
-		func(fldPath *field.Path, obj, oldObj *string) (errs field.ErrorList) {
-			if op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
-				return nil // no changes
+		func(fldPath *field.Path, obj, oldObj *string, oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
+				return nil
 			}
+			// call field-attached validations
 			errs = append(errs, validate.IfOption(ctx, op, fldPath, obj, oldObj, "FeatureX", true, func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *string) field.ErrorList {
 				return validate.FixedResult(ctx, op, fldPath, obj, oldObj, false, "field Struct.XEnabledField")
 			})...)
 			return
-		}(fldPath.Child("xEnabledField"), &obj.XEnabledField, safe.Field(oldObj, func(oldObj *Struct) *string { return &oldObj.XEnabledField }))...)
+		}(fldPath.Child("xEnabledField"), &obj.XEnabledField, safe.Field(oldObj, func(oldObj *Struct) *string { return &oldObj.XEnabledField }), oldObj != nil)...)
 
 	// field Struct.XDisabledField
 	errs = append(errs,
-		func(fldPath *field.Path, obj, oldObj *string) (errs field.ErrorList) {
-			if op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
-				return nil // no changes
+		func(fldPath *field.Path, obj, oldObj *string, oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
+				return nil
 			}
+			// call field-attached validations
 			errs = append(errs, validate.IfOption(ctx, op, fldPath, obj, oldObj, "FeatureX", false, func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *string) field.ErrorList {
 				return validate.FixedResult(ctx, op, fldPath, obj, oldObj, false, "field Struct.XDisabledField")
 			})...)
 			return
-		}(fldPath.Child("xDisabledField"), &obj.XDisabledField, safe.Field(oldObj, func(oldObj *Struct) *string { return &oldObj.XDisabledField }))...)
+		}(fldPath.Child("xDisabledField"), &obj.XDisabledField, safe.Field(oldObj, func(oldObj *Struct) *string { return &oldObj.XDisabledField }), oldObj != nil)...)
 
 	// field Struct.YEnabledField
 	errs = append(errs,
-		func(fldPath *field.Path, obj, oldObj *string) (errs field.ErrorList) {
-			if op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
-				return nil // no changes
+		func(fldPath *field.Path, obj, oldObj *string, oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
+				return nil
 			}
+			// call field-attached validations
 			errs = append(errs, validate.IfOption(ctx, op, fldPath, obj, oldObj, "FeatureY", true, func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *string) field.ErrorList {
 				return validate.FixedResult(ctx, op, fldPath, obj, oldObj, false, "field Struct.YEnabledField")
 			})...)
 			return
-		}(fldPath.Child("yEnabledField"), &obj.YEnabledField, safe.Field(oldObj, func(oldObj *Struct) *string { return &oldObj.YEnabledField }))...)
+		}(fldPath.Child("yEnabledField"), &obj.YEnabledField, safe.Field(oldObj, func(oldObj *Struct) *string { return &oldObj.YEnabledField }), oldObj != nil)...)
 
 	// field Struct.YDisabledField
 	errs = append(errs,
-		func(fldPath *field.Path, obj, oldObj *string) (errs field.ErrorList) {
-			if op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
-				return nil // no changes
+		func(fldPath *field.Path, obj, oldObj *string, oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
+				return nil
 			}
+			// call field-attached validations
 			errs = append(errs, validate.IfOption(ctx, op, fldPath, obj, oldObj, "FeatureY", false, func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *string) field.ErrorList {
 				return validate.FixedResult(ctx, op, fldPath, obj, oldObj, false, "field Struct.YDisabledField")
 			})...)
 			return
-		}(fldPath.Child("yDisabledField"), &obj.YDisabledField, safe.Field(oldObj, func(oldObj *Struct) *string { return &oldObj.YDisabledField }))...)
+		}(fldPath.Child("yDisabledField"), &obj.YDisabledField, safe.Field(oldObj, func(oldObj *Struct) *string { return &oldObj.YDisabledField }), oldObj != nil)...)
 
 	// field Struct.XYMixedField
 	errs = append(errs,
-		func(fldPath *field.Path, obj, oldObj *string) (errs field.ErrorList) {
-			if op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
-				return nil // no changes
+		func(fldPath *field.Path, obj, oldObj *string, oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update && (obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj)) {
+				return nil
 			}
+			// call field-attached validations
 			errs = append(errs, validate.IfOption(ctx, op, fldPath, obj, oldObj, "FeatureY", false, func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *string) field.ErrorList {
 				return validate.FixedResult(ctx, op, fldPath, obj, oldObj, false, "field Struct.XYMixedField/Y")
 			})...)
@@ -125,7 +140,7 @@ func Validate_Struct(ctx context.Context, op operation.Operation, fldPath *field
 				return validate.FixedResult(ctx, op, fldPath, obj, oldObj, false, "field Struct.XYMixedField/X")
 			})...)
 			return
-		}(fldPath.Child("xyMixedField"), &obj.XYMixedField, safe.Field(oldObj, func(oldObj *Struct) *string { return &oldObj.XYMixedField }))...)
+		}(fldPath.Child("xyMixedField"), &obj.XYMixedField, safe.Field(oldObj, func(oldObj *Struct) *string { return &oldObj.XYMixedField }), oldObj != nil)...)
 
 	return errs
 }

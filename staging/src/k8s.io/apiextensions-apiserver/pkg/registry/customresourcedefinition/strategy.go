@@ -223,7 +223,7 @@ func getUnrecognizedFormatsInSchema(schema *apiextensions.JSONSchemaProps, compa
 	validation.SchemaHas(schema, func(s *apiextensions.JSONSchemaProps) bool {
 		if len(s.Format) > 0 {
 			// Convert to spec.Schema for format validation
-			specSchema := &spec.Schema{SchemaProps: spec.SchemaProps{Format: s.Format}}
+			specSchema := &spec.Schema{SchemaProps: spec.SchemaProps{Format: s.Format, Type: []string{s.Type}}}
 			if formats := apiservervalidation.GetUnrecognizedFormats(specSchema, compatibilityVersion); len(formats) > 0 {
 				unrecognizedFormats = append(unrecognizedFormats, formats...)
 			}
@@ -334,6 +334,9 @@ func dropDisabledFields(newCRD *apiextensions.CustomResourceDefinition, oldCRD *
 	if !utilfeature.DefaultFeatureGate.Enabled(apiextensionsfeatures.CustomResourceFieldSelectors) && (oldCRD == nil || (oldCRD != nil && !specHasSelectableFields(&oldCRD.Spec))) {
 		dropSelectableFields(&newCRD.Spec)
 	}
+	if !utilfeature.DefaultFeatureGate.Enabled(apiextensionsfeatures.CRDObservedGenerationTracking) && (oldCRD == nil || !observedGenerationTrackingInUse(&oldCRD.Status)) {
+		dropObservedGeneration(&newCRD.Status)
+	}
 }
 
 // dropOptionalOldSelfField drops field optionalOldSelf from CRD schema
@@ -382,6 +385,25 @@ func dropSelectableFields(spec *apiextensions.CustomResourceDefinitionSpec) {
 	for i := range spec.Versions {
 		spec.Versions[i].SelectableFields = nil
 	}
+}
+
+func dropObservedGeneration(status *apiextensions.CustomResourceDefinitionStatus) {
+	status.ObservedGeneration = 0
+	for i := range status.Conditions {
+		status.Conditions[i].ObservedGeneration = 0
+	}
+}
+
+func observedGenerationTrackingInUse(status *apiextensions.CustomResourceDefinitionStatus) bool {
+	if status.ObservedGeneration != 0 {
+		return true
+	}
+	for i := range status.Conditions {
+		if status.Conditions[i].ObservedGeneration != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func specHasSelectableFields(spec *apiextensions.CustomResourceDefinitionSpec) bool {

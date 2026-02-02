@@ -1,5 +1,4 @@
 //go:build !windows
-// +build !windows
 
 /*
 Copyright 2022 The Kubernetes Authors.
@@ -38,7 +37,7 @@ func TestMakeUserNsManagerDisabled(t *testing.T) {
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.UserNamespacesSupport, false)
 
 	testUserNsPodsManager := &testUserNsPodsManager{}
-	_, err := MakeUserNsManager(logger, testUserNsPodsManager)
+	_, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 	assert.NoError(t, err)
 }
 
@@ -47,7 +46,7 @@ func TestReleaseDisabled(t *testing.T) {
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.UserNamespacesSupport, false)
 
 	testUserNsPodsManager := &testUserNsPodsManager{}
-	m, err := MakeUserNsManager(logger, testUserNsPodsManager)
+	m, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 	require.NoError(t, err)
 
 	m.Release(logger, "some-pod")
@@ -98,12 +97,12 @@ func TestGetOrCreateUserNamespaceMappingsDisabled(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			logger, ctx := ktesting.NewTestContext(t)
+			logger, _ := ktesting.NewTestContext(t)
 			testUserNsPodsManager := &testUserNsPodsManager{}
-			m, err := MakeUserNsManager(logger, testUserNsPodsManager)
+			m, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 			require.NoError(t, err)
 
-			userns, err := m.GetOrCreateUserNamespaceMappings(ctx, test.pod, "")
+			userns, err := m.GetOrCreateUserNamespaceMappings(logger, test.pod, "")
 			assert.Nil(t, userns)
 			if test.success {
 				assert.NoError(t, err)
@@ -119,7 +118,7 @@ func TestCleanupOrphanedPodUsernsAllocationsDisabled(t *testing.T) {
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.UserNamespacesSupport, false)
 
 	testUserNsPodsManager := &testUserNsPodsManager{}
-	m, err := MakeUserNsManager(logger, testUserNsPodsManager)
+	m, err := MakeUserNsManager(logger, testUserNsPodsManager, nil)
 	require.NoError(t, err)
 
 	err = m.CleanupOrphanedPodUsernsAllocations(ctx, nil, nil)

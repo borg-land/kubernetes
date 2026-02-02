@@ -68,9 +68,13 @@ func NewSimpleMetadataClient(scheme *runtime.Scheme, objects ...runtime.Object) 
 	cs := &FakeMetadataClient{scheme: scheme, tracker: o}
 	cs.AddReactor("*", "*", testing.ObjectReaction(o))
 	cs.AddWatchReactor("*", func(action testing.Action) (handled bool, ret watch.Interface, err error) {
+		var opts metav1.ListOptions
+		if watchAction, ok := action.(testing.WatchActionImpl); ok {
+			opts = watchAction.ListOptions
+		}
 		gvr := action.GetResource()
 		ns := action.GetNamespace()
-		watch, err := o.Watch(gvr, ns)
+		watch, err := o.Watch(gvr, ns, opts)
 		if err != nil {
 			return false, nil, err
 		}
@@ -107,6 +111,10 @@ func (c *FakeMetadataClient) Tracker() testing.ObjectTracker {
 // Resource returns an interface for accessing the provided resource.
 func (c *FakeMetadataClient) Resource(resource schema.GroupVersionResource) metadata.Getter {
 	return &metadataResourceClient{client: c, resource: resource}
+}
+
+func (c *FakeMetadataClient) IsWatchListSemanticsUnSupported() bool {
+	return true
 }
 
 // Namespace returns an interface for accessing the current resource in the specified

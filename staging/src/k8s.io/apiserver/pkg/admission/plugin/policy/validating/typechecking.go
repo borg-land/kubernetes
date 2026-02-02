@@ -25,7 +25,7 @@ import (
 
 	"github.com/google/cel-go/cel"
 
-	"k8s.io/api/admissionregistration/v1"
+	v1 "k8s.io/api/admissionregistration/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -39,8 +39,6 @@ import (
 	"k8s.io/apiserver/pkg/cel/library"
 	"k8s.io/apiserver/pkg/cel/openapi"
 	"k8s.io/apiserver/pkg/cel/openapi/resolver"
-	"k8s.io/apiserver/pkg/features"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/klog/v2"
 )
 
@@ -185,14 +183,11 @@ func (c *TypeChecker) compiler(ctx *TypeCheckingContext, typeOverwrite typeOverw
 	if err != nil {
 		return nil, err
 	}
-	env, err := plugincel.NewCompositionEnv(plugincel.VariablesTypeName, envSet)
+	compiler, err := plugincel.NewCompositedCompilerForTypeChecking(envSet)
 	if err != nil {
 		return nil, err
 	}
-	compiler := &plugincel.CompositedCompiler{
-		Compiler:       &typeCheckingCompiler{typeOverwrite: typeOverwrite, compositionEnv: env},
-		CompositionEnv: env,
-	}
+	compiler.Compiler = &typeCheckingCompiler{typeOverwrite: typeOverwrite, compiler: compiler}
 	return compiler, nil
 }
 
@@ -212,7 +207,6 @@ func (c *TypeChecker) CheckExpression(ctx *TypeCheckingContext, expression strin
 		options := plugincel.OptionalVariableDeclarations{
 			HasParams:     ctx.paramDeclType != nil,
 			HasAuthorizer: true,
-			StrictCost:    utilfeature.DefaultFeatureGate.Enabled(features.StrictCostEnforcementForVAP),
 		}
 		compiler.CompileAndStoreVariables(convertv1beta1Variables(ctx.variables), options, environment.StoredExpressions)
 		result := compiler.CompileCELExpression(celExpression(expression), options, environment.StoredExpressions)
@@ -394,7 +388,7 @@ func (c *TypeChecker) tryRefreshRESTMapper() {
 }
 
 func buildEnvSet(hasParams bool, hasAuthorizer bool, types typeOverwrite) (*environment.EnvSet, error) {
-	baseEnv := environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion(), utilfeature.DefaultFeatureGate.Enabled(features.StrictCostEnforcementForVAP))
+	baseEnv := environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion())
 	requestType := plugincel.BuildRequestType()
 	namespaceType := plugincel.BuildNamespaceType()
 
@@ -452,8 +446,8 @@ func createVariableOpts(declType *apiservercel.DeclType, variables ...string) []
 }
 
 type typeCheckingCompiler struct {
-	compositionEnv *plugincel.CompositionEnv
-	typeOverwrite  typeOverwrite
+	compiler      *plugincel.CompositedCompiler
+	typeOverwrite typeOverwrite
 }
 
 // CompileCELExpression compiles the given expression.
@@ -472,7 +466,7 @@ func (c *typeCheckingCompiler) CompileCELExpression(expressionAccessor plugincel
 			ExpressionAccessor: expressionAccessor,
 		}
 	}
-	env, err := c.compositionEnv.Env(mode)
+	env, err := c.compiler.Env(mode)
 	if err != nil {
 		return resultError(fmt.Sprintf("fail to build env: %v", err), apiservercel.ErrorTypeInternal)
 	}

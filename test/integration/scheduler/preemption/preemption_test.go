@@ -20,12 +20,15 @@ package preemption
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -41,7 +44,7 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 	configtesting "k8s.io/kubernetes/pkg/scheduler/apis/config/testing"
 	"k8s.io/kubernetes/pkg/scheduler/backend/queue"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultbinder"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultpreemption"
 	plfeature "k8s.io/kubernetes/pkg/scheduler/framework/plugins/feature"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
@@ -98,7 +101,7 @@ func (fp *tokenFilter) Filter(ctx context.Context, state fwk.CycleState, pod *v1
 	return fwk.NewStatus(status, fmt.Sprintf("can't fit %v", pod.Name))
 }
 
-func (fp *tokenFilter) PreFilter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodes []fwk.NodeInfo) (*framework.PreFilterResult, *fwk.Status) {
+func (fp *tokenFilter) PreFilter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodes []fwk.NodeInfo) (*fwk.PreFilterResult, *fwk.Status) {
 	if !fp.EnablePreFilter || fp.Tokens > 0 {
 		return nil, nil
 	}
@@ -117,18 +120,18 @@ func (fp *tokenFilter) RemovePod(ctx context.Context, state fwk.CycleState, podT
 	return nil
 }
 
-func (fp *tokenFilter) PreFilterExtensions() framework.PreFilterExtensions {
+func (fp *tokenFilter) PreFilterExtensions() fwk.PreFilterExtensions {
 	return fp
 }
 
-var _ framework.FilterPlugin = &tokenFilter{}
+var _ fwk.FilterPlugin = &tokenFilter{}
 
 // TestPreemption tests a few preemption scenarios.
 func TestPreemption(t *testing.T) {
 	// Initialize scheduler with a filter plugin.
 	var filter tokenFilter
 	registry := make(frameworkruntime.Registry)
-	err := registry.Register(filterPluginName, func(_ context.Context, _ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+	err := registry.Register(filterPluginName, func(_ context.Context, _ runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
 		return &filter, nil
 	})
 	if err != nil {
@@ -406,9 +409,11 @@ func TestPreemption(t *testing.T) {
 			for _, clearingNominatedNodeNameAfterBinding := range []bool{true, false} {
 				for _, test := range tests {
 					t.Run(fmt.Sprintf("%s (Async preemption enabled: %v, Async API calls enabled: %v, ClearingNominatedNodeNameAfterBinding: %v)", test.name, asyncPreemptionEnabled, asyncAPICallsEnabled, clearingNominatedNodeNameAfterBinding), func(t *testing.T) {
-						featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SchedulerAsyncPreemption, asyncPreemptionEnabled)
-						featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SchedulerAsyncAPICalls, asyncAPICallsEnabled)
-						featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ClearingNominatedNodeNameAfterBinding, clearingNominatedNodeNameAfterBinding)
+						featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+							features.SchedulerAsyncPreemption:              asyncPreemptionEnabled,
+							features.SchedulerAsyncAPICalls:                asyncAPICallsEnabled,
+							features.ClearingNominatedNodeNameAfterBinding: clearingNominatedNodeNameAfterBinding,
+						})
 
 						testCtx := testutils.InitTestSchedulerWithOptions(t,
 							testutils.InitTestAPIServer(t, "preemption", nil),
@@ -479,6 +484,9 @@ func TestPreemption(t *testing.T) {
 }
 
 func TestAsyncPreemption(t *testing.T) {
+	const podBlockedInBindingName = "pod-blocked-in-binding"
+	const reservingPodName = "reserving-pod"
+
 	type createPod struct {
 		pod *v1.Pod
 		// count is the number of times the pod should be created by this action.
@@ -488,8 +496,9 @@ func TestAsyncPreemption(t *testing.T) {
 	}
 
 	type schedulePod struct {
-		podName       string
-		expectSuccess bool
+		podName             string
+		expectSuccess       bool
+		expectUnschedulable bool
 	}
 
 	type scenario struct {
@@ -500,6 +509,8 @@ func TestAsyncPreemption(t *testing.T) {
 
 		// createPod creates a Pod.
 		createPod *createPod
+		// createNode creates an additional Node.
+		createNode string
 		// schedulePod schedules one Pod that is at the top of the activeQ.
 		// You should give a Pod name that is supposed to be scheduled.
 		schedulePod *schedulePod
@@ -513,6 +524,15 @@ func TestAsyncPreemption(t *testing.T) {
 		// You should give a Pod index representing the order of Pod creation.
 		// e.g., if you want to check the Pod created first in the test case, you should give 0.
 		podRunningPreemption *int
+		// activatePod moves the pod from unschedulable to active or backoff.
+		// The value is the name of the pod to activate.
+		activatePod string
+		// resumeBind resumes the binding operation that keeps the pod blocked.
+		// Note: The pod will only become blocked in the first place, if pod name matches string defined in podBlockedInBinding.
+		resumeBind bool
+		// verifyPodInUnschedulable waits for some time and confirms that the given pod is in the unschedulable pool.
+		// The value is the name of the checked pod.
+		verifyPodInUnschedulable string
 	}
 
 	tests := []struct {
@@ -540,7 +560,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the preemptor Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor",
+						podName:             "preemptor",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -557,6 +578,49 @@ func TestAsyncPreemption(t *testing.T) {
 				},
 				{
 					name: "schedule the preemptor Pod after the preemption",
+					schedulePod: &schedulePod{
+						podName:       "preemptor",
+						expectSuccess: true,
+					},
+				},
+			},
+		},
+		{
+			name: "basic async preemption with 1 victim, preemptor gated until preemption API call finishes",
+			scenarios: []scenario{
+				{
+					name: "create victim",
+					createPod: &createPod{
+						pod: st.MakePod().GenerateName("victim-").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Node("node").Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
+					},
+				},
+				{
+					name: "create a preemptor Pod",
+					createPod: &createPod{
+						pod: st.MakePod().Name("preemptor").Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Container("image").Priority(100).Obj(),
+					},
+				},
+				{
+					name: "schedule the preemptor Pod",
+					schedulePod: &schedulePod{
+						podName:             "preemptor",
+						expectUnschedulable: true,
+					},
+				},
+				{
+					name:            "check the preemptor Pod is in the queue and gated",
+					podGatedInQueue: "preemptor",
+				},
+				{
+					name:                 "check the preemptor Pod making the preemption API calls",
+					podRunningPreemption: ptr.To(1),
+				},
+				{
+					name:               "complete the preemption API call",
+					completePreemption: "preemptor",
+				},
+				{
+					name: "schedule the preemptor Pod again and expect it to be scheduled",
 					schedulePod: &schedulePod{
 						podName:       "preemptor",
 						expectSuccess: true,
@@ -583,7 +647,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the preemptor Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-high-priority",
+						podName:             "preemptor-high-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -605,7 +670,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the mid-priority Pod",
 					schedulePod: &schedulePod{
-						podName: "pod-mid-priority",
+						podName:             "pod-mid-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -623,7 +689,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the mid-priority Pod again",
 					schedulePod: &schedulePod{
-						podName: "pod-mid-priority",
+						podName:             "pod-mid-priority",
+						expectUnschedulable: true,
 					},
 				},
 			},
@@ -647,7 +714,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the preemptor Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-high-priority",
+						podName:             "preemptor-high-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -669,7 +737,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the super-high-priority Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-super-high-priority",
+						podName:             "preemptor-super-high-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -701,7 +770,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the high-priority Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-high-priority",
+						podName:             "preemptor-high-priority",
+						expectUnschedulable: true,
 					},
 				},
 			},
@@ -726,7 +796,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the preemptor Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-high-priority",
+						podName:             "preemptor-high-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -749,7 +820,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the mid-priority Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-mid-priority",
+						podName:             "preemptor-mid-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -785,11 +857,362 @@ func TestAsyncPreemption(t *testing.T) {
 				},
 			},
 		},
+		{
+			// This scenario verifies the fix for https://github.com/kubernetes/kubernetes/issues/134217
+			// Scenario reproduces the issue:
+			// Victim pod takes long in binding. Preemptor pod attempts preemption, goes to unschedulable, then the victim is deleted.
+			// Preemptor pod is woken up by the Pod/Delete event and is being scheduled, even before the victim binding is terminated.
+			name: "victim blocked in binding, preemptor pod gets scheduled after victim-in-binding is deleted",
+			scenarios: []scenario{
+				{
+					name: "create victim Pod that is going to be blocked in binding",
+					createPod: &createPod{
+						pod: st.MakePod().Name(podBlockedInBindingName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
+					},
+				},
+				{
+					name: "schedule victim Pod",
+					schedulePod: &schedulePod{
+						podName: podBlockedInBindingName,
+					},
+				},
+				{
+					name: "create a preemptor Pod",
+					createPod: &createPod{
+						pod: st.MakePod().Name("preemptor").Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Container("image").Priority(100).Obj(),
+					},
+				},
+				{
+					name: "schedule the preemptor Pod",
+					schedulePod: &schedulePod{
+						podName:             "preemptor",
+						expectUnschedulable: true,
+					},
+				},
+				{
+					name:               "complete the preemption API call",
+					completePreemption: "preemptor",
+				},
+				{
+					name: "schedule the preemptor Pod again and expect it to be scheduled (assumed victim pod was forgotten)",
+					schedulePod: &schedulePod{
+						podName:       "preemptor",
+						expectSuccess: true,
+					},
+				},
+				{
+					name:       "resume binding of the blocked pod",
+					resumeBind: true,
+				},
+			},
+		},
+		{
+			// This scenario verifies the fix for https://github.com/kubernetes/kubernetes/issues/134217
+			// Scenario reproduces the issue, but with a victim that is under graceful termination:
+			// Victim pod takes long in binding. Preemptor pod attempts preemption, goes to unschedulable, then the victim's graceful termination is initiated.
+			// Preemptor pod is woken up by the Pod/Update event (working like AssignedPodDeleted) and is being scheduled, even before the victim binding is terminated.
+			name: "victim blocked in binding, preemptor pod gets scheduled when victim-in-binding is under graceful termination",
+			scenarios: []scenario{
+				{
+					name: "create victim Pod with long termination grace period that is going to be blocked in binding",
+					createPod: &createPod{
+						pod: st.MakePod().Name(podBlockedInBindingName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).TerminationGracePeriodSeconds(1000).Container("image").Priority(1).Obj(),
+					},
+				},
+				{
+					name: "schedule victim Pod",
+					schedulePod: &schedulePod{
+						podName: podBlockedInBindingName,
+					},
+				},
+				{
+					name: "create a preemptor Pod",
+					createPod: &createPod{
+						pod: st.MakePod().Name("preemptor").Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Container("image").Priority(100).Obj(),
+					},
+				},
+				{
+					name: "schedule the preemptor Pod",
+					schedulePod: &schedulePod{
+						podName:             "preemptor",
+						expectUnschedulable: true,
+					},
+				},
+				{
+					name:               "complete the preemption API call",
+					completePreemption: "preemptor",
+				},
+				{
+					name: "schedule the preemptor Pod again and expect it to be scheduled (assumed victim pod was forgotten)",
+					schedulePod: &schedulePod{
+						podName:       "preemptor",
+						expectSuccess: true,
+					},
+				},
+			},
+		},
+		{
+			// This scenario verifies the fix for https://github.com/kubernetes/kubernetes/issues/134217
+			// Scenario reproduces the issue, but with a victim that is under graceful termination:
+			// Victim pod takes long in binding. Preemptor pod attempts preemption, goes to unschedulable, then the victim's graceful termination is initiated.
+			// Preemptor pod is woken up by the Pod/Update event (working like AssignedPodDeleted) and is being scheduled, even before the victim binding is terminated.
+			name: "victim blocked in binding, preemptor pod gets scheduled when victim-in-binding is under graceful termination",
+			scenarios: []scenario{
+				{
+					name: "create victim Pod with long termination grace period that is going to be blocked in binding",
+					createPod: &createPod{
+						pod: st.MakePod().Name(podBlockedInBindingName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").TerminationGracePeriodSeconds(1000).Priority(1).Obj(),
+					},
+				},
+				{
+					name: "schedule victim Pod",
+					schedulePod: &schedulePod{
+						podName: podBlockedInBindingName,
+					},
+				},
+				{
+					name: "create a preemptor Pod",
+					createPod: &createPod{
+						pod: st.MakePod().Name("preemptor").Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Container("image").Priority(100).Obj(),
+					},
+				},
+				{
+					name: "schedule the preemptor Pod",
+					schedulePod: &schedulePod{
+						podName:             "preemptor",
+						expectUnschedulable: true,
+					},
+				},
+				{
+					name:               "complete the preemption API call",
+					completePreemption: "preemptor",
+				},
+				{
+					name: "schedule the preemptor Pod again and expect it to be scheduled (assumed victim pod was forgotten)",
+					schedulePod: &schedulePod{
+						podName:       "preemptor",
+						expectSuccess: true,
+					},
+				},
+				{
+					name:       "resume binding of the blocked pod",
+					resumeBind: true,
+				},
+			},
+		},
+		{
+			// This scenario verifies the fix for https://github.com/kubernetes/kubernetes/issues/134217
+			// Scenario reproduces the issue, but with a victim that is reserving some resources required by the preemptor:
+			// Victim pod takes long in binding. Preemptor pod attempts preemption, goes to unschedulable, then the victim is deleted.
+			// Preemptor pod is woken up by the Pod/Update event (working like AssignedPodDeleted), but is still unschedulable, because victim has to unreserve its resources.
+			// After resuming binding for a victim, it releases the resources in its failure handler, preemptor is woken up again and ultimately scheduled.
+			name: "victim blocked in binding, preemptor pod gets scheduled after victim-in-binding is deleted and its resources are unreserved",
+			scenarios: []scenario{
+				{
+					name: "create victim Pod that is going to be blocked in binding",
+					createPod: &createPod{
+						pod: st.MakePod().Name(podBlockedInBindingName + reservingPodName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
+					},
+				},
+				{
+					name: "schedule victim Pod",
+					schedulePod: &schedulePod{
+						podName: podBlockedInBindingName + reservingPodName,
+					},
+				},
+				{
+					name: "create a preemptor Pod",
+					createPod: &createPod{
+						pod: st.MakePod().Name("preemptor").Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Container("image").Priority(100).Obj(),
+					},
+				},
+				{
+					name: "schedule the preemptor Pod",
+					schedulePod: &schedulePod{
+						podName:             "preemptor",
+						expectUnschedulable: true,
+					},
+				},
+				{
+					name:               "complete the preemption API call",
+					completePreemption: "preemptor",
+				},
+				{
+					name: "schedule the preemptor Pod again and expect it to be unschedulable (resources are still reserved by the victim)",
+					schedulePod: &schedulePod{
+						podName:             "preemptor",
+						expectUnschedulable: true,
+					},
+				},
+				{
+					name:       "resume binding of the blocked pod",
+					resumeBind: true,
+				},
+				{
+					name: "schedule the preemptor Pod again and expect it to be scheduled (victim pod unreserved its resources)",
+					schedulePod: &schedulePod{
+						podName:       "preemptor",
+						expectSuccess: true,
+					},
+				},
+			},
+		},
+		{
+			// This scenario verifies the fix for https://github.com/kubernetes/kubernetes/issues/134217
+			// Scenario reproduces the issue, but with a victim that is under graceful termination and sis reserving some resources required by the preemptor:
+			// Victim pod takes long in binding. Preemptor pod attempts preemption, goes to unschedulable, then the victim's graceful termination is initiated.
+			// Preemptor pod is woken up by the Pod/Update event (working like AssignedPodDeleted), but is still unschedulable, because victim has to unreserve its resources.
+			// After resuming binding for a victim, it releases the resources in its failure handler, preemptor is woken up again and ultimately scheduled.
+			name: "victim blocked in binding, preemptor pod gets scheduled after victim-in-binding is under graceful termination and its resources are unreserved",
+			scenarios: []scenario{
+				{
+					name: "create victim Pod that is going to be blocked in binding",
+					createPod: &createPod{
+						pod: st.MakePod().Name(podBlockedInBindingName + reservingPodName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").TerminationGracePeriodSeconds(1000).Priority(1).Obj(),
+					},
+				},
+				{
+					name: "schedule victim Pod",
+					schedulePod: &schedulePod{
+						podName: podBlockedInBindingName + reservingPodName,
+					},
+				},
+				{
+					name: "create a preemptor Pod",
+					createPod: &createPod{
+						pod: st.MakePod().Name("preemptor").Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Container("image").Priority(100).Obj(),
+					},
+				},
+				{
+					name: "schedule the preemptor Pod",
+					schedulePod: &schedulePod{
+						podName:             "preemptor",
+						expectUnschedulable: true,
+					},
+				},
+				{
+					name:               "complete the preemption API call",
+					completePreemption: "preemptor",
+				},
+				{
+					name: "schedule the preemptor Pod again and expect it to be unschedulable (resources are still reserved by the victim)",
+					schedulePod: &schedulePod{
+						podName:             "preemptor",
+						expectUnschedulable: true,
+					},
+				},
+				{
+					name:       "resume binding of the blocked pod",
+					resumeBind: true,
+				},
+				{
+					name: "schedule the preemptor Pod again and expect it to be scheduled (victim pod unreserved its resources)",
+					schedulePod: &schedulePod{
+						podName:       "preemptor",
+						expectSuccess: true,
+					},
+				},
+			},
+		},
+		{
+			// Expected test outcome: lower priority Pod switches to another node, does not get stuck in unschedulable queue forever. (This part is in comment due to test name length limit.)
+			name: "While lower priority Pod is waiting for preemption, higher priority Pod takes its place on the node",
+			scenarios: []scenario{
+				{
+					name: "create N-1 victim Pods on the first node",
+					createPod: &createPod{
+						pod:   st.MakePod().GenerateName("victim-").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Node("node").Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
+						count: ptr.To(3),
+					},
+				},
+				{
+					name: "create the last victim Pod on the first node, that is going to be blocked in binding",
+					createPod: &createPod{
+						pod: st.MakePod().Name(podBlockedInBindingName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
+					},
+				},
+				{
+					name: "schedule the last victim Pod",
+					schedulePod: &schedulePod{
+						podName: podBlockedInBindingName,
+					},
+				},
+				{
+					name: "create a mid-priority preemptor Pod",
+					createPod: &createPod{
+						pod: st.MakePod().Name("preemptor-mid-priority").Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Container("image").Priority(50).Obj(),
+					},
+				},
+				{
+					name: "schedule the mid-priority preemptor Pod",
+					schedulePod: &schedulePod{
+						podName: "preemptor-mid-priority",
+					},
+				},
+				{
+					name:               "complete the preemption API calls",
+					completePreemption: "preemptor-mid-priority",
+				},
+				{
+					name:            "check the mid-priority preemptor Pod is gated, waiting for the last victim to be preempted",
+					podGatedInQueue: "preemptor-mid-priority",
+				},
+				{
+					name:       "create node2",
+					createNode: "node2",
+				},
+				{
+					name: "create victim Pods on node2",
+					createPod: &createPod{
+						pod:   st.MakePod().GenerateName("victim-").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Node("node2").Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
+						count: ptr.To(4),
+					},
+				},
+				{
+					name: "create a high-priority preemptor Pod",
+					createPod: &createPod{
+						pod: st.MakePod().Name("preemptor-high-priority").Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").Priority(100).Obj(),
+					},
+				},
+				{
+					name: "schedule the high-priority preemptor Pod and expect it to get scheduled on node1",
+					// While we don't check explicitly that Pod is scheduled on node1, we can assume that because
+					// Pod won't fit on node2 without preemption and there are enough resources on node1.
+					schedulePod: &schedulePod{
+						podName:       "preemptor-high-priority",
+						expectSuccess: true,
+					},
+				},
+				{
+					name:       "allow the preemption of the last victim Pod on node1 to finish",
+					resumeBind: true,
+				},
+				{
+					name: "check that mid-priority preemptor Pod got activated by completed preemption and try scheduling it again",
+					schedulePod: &schedulePod{
+						podName: "preemptor-mid-priority",
+						// Pod won't fit on node1 anymore and should trigger preemptions on node2.
+						expectUnschedulable: true,
+					},
+				},
+				{
+					name:               "complete the preemption API calls on node2",
+					completePreemption: "preemptor-mid-priority",
+				},
+				{
+					name: "check that mid-priority Pod got activated, schedule it on node2",
+					schedulePod: &schedulePod{
+						podName:       "preemptor-mid-priority",
+						expectSuccess: true,
+					},
+				},
+			},
+		},
 	}
 
 	// All test cases have the same node.
 	node := st.MakeNode().Name("node").Capacity(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Obj()
-	for _, asyncAPICallsEnabled := range []bool{true, false} {
+	for _, asyncAPICallsEnabled := range []bool{true} {
 		for _, test := range tests {
 			t.Run(fmt.Sprintf("%s (Async API calls enabled: %v)", test.name, asyncAPICallsEnabled), func(t *testing.T) {
 				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SchedulerAsyncAPICalls, asyncAPICallsEnabled)
@@ -808,7 +1231,7 @@ func TestAsyncPreemption(t *testing.T) {
 				}()
 				registry := make(frameworkruntime.Registry)
 				var preemptionPlugin *defaultpreemption.DefaultPreemption
-				err := registry.Register(delayedPreemptionPluginName, func(c context.Context, r runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+				err := registry.Register(delayedPreemptionPluginName, func(c context.Context, r runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
 					p, err := frameworkruntime.FactoryAdapter(plfeature.Features{EnableAsyncPreemption: true}, defaultpreemption.New)(c, &config.DefaultPreemptionArgs{
 						// Set default values to pass the validation at the initialization, not related to the test.
 						MinCandidateNodesPercentage: 10,
@@ -841,16 +1264,54 @@ func TestAsyncPreemption(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Error registering a filter: %v", err)
 				}
+
+				// Register fake bind plugin that will block on binding for the specified pod name, until it receives a resume signal via the blockBindingChannel.
+				blockBindingChannel := make(chan struct{})
+				defer close(blockBindingChannel)
+				blockingBindPluginName := "blockingBindPlugin"
+				err = registry.Register(blockingBindPluginName, func(ctx context.Context, o runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
+					db, err := defaultbinder.New(ctx, o, fh)
+					if err != nil {
+						t.Fatalf("Error creating a default binder plugin: %v", err)
+					}
+					var bindPlugin = blockingBindPlugin{
+						name:                blockingBindPluginName,
+						nameOfPodToBlock:    podBlockedInBindingName,
+						realPlugin:          db.(fwk.BindPlugin),
+						blockBindingChannel: blockBindingChannel,
+					}
+					return &bindPlugin, nil
+				})
+				if err != nil {
+					t.Fatalf("Error registering a bind plugin: %v", err)
+				}
+
+				// Register fake plugin that will reserve some fake resources for one pod.
+				// This could be used to check scheduler's behavior when the victim has to unreserve these resources to let the preemptor schedule.
+				reservingPluginName := "reservingPlugin"
+				err = registry.Register(reservingPluginName, func(ctx context.Context, o runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
+					return &reservingPlugin{
+						name:               reservingPluginName,
+						nameOfPodToReserve: reservingPodName,
+					}, nil
+				})
+				if err != nil {
+					t.Fatalf("Error registering a reserving plugin: %v", err)
+				}
+
 				cfg := configtesting.V1ToInternalWithDefaults(t, configv1.KubeSchedulerConfiguration{
 					Profiles: []configv1.KubeSchedulerProfile{{
 						SchedulerName: ptr.To(v1.DefaultSchedulerName),
 						Plugins: &configv1.Plugins{
 							MultiPoint: configv1.PluginSet{
 								Enabled: []configv1.Plugin{
+									{Name: blockingBindPluginName},
 									{Name: delayedPreemptionPluginName},
+									{Name: reservingPluginName},
 								},
 								Disabled: []configv1.Plugin{
 									{Name: names.DefaultPreemption},
+									{Name: names.DefaultBinder},
 								},
 							},
 						},
@@ -903,6 +1364,16 @@ func TestAsyncPreemption(t *testing.T) {
 				for _, scenario := range test.scenarios {
 					t.Logf("Running scenario: %s", scenario.name)
 					switch {
+					case scenario.createNode != "":
+						newNode := st.MakeNode().Name(scenario.createNode).Capacity(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Obj()
+						if _, err := cs.CoreV1().Nodes().Create(ctx, newNode, metav1.CreateOptions{}); err != nil {
+							t.Fatalf("Failed to create an initial Node %q: %v", newNode.Name, err)
+						}
+						defer func() {
+							if err := cs.CoreV1().Nodes().Delete(ctx, newNode.Name, metav1.DeleteOptions{}); err != nil {
+								t.Fatalf("Failed to delete the Node %q: %v", newNode.Name, err)
+							}
+						}()
 					case scenario.createPod != nil:
 						if scenario.createPod.count == nil {
 							scenario.createPod.count = ptr.To(1)
@@ -938,15 +1409,23 @@ func TestAsyncPreemption(t *testing.T) {
 						preemptionDoneChannels[scenario.schedulePod.podName] = make(chan struct{})
 						lock.Unlock()
 						testCtx.Scheduler.ScheduleOne(testCtx.Ctx)
+
 						if scenario.schedulePod.expectSuccess {
 							if err := wait.PollUntilContextTimeout(testCtx.Ctx, 200*time.Millisecond, wait.ForeverTestTimeout, false, testutils.PodScheduled(cs, testCtx.NS.Name, scenario.schedulePod.podName)); err != nil {
 								t.Fatalf("Expected the pod %s to be scheduled", scenario.schedulePod.podName)
 							}
-						} else {
+						} else if scenario.schedulePod.expectUnschedulable {
 							if !podInUnschedulablePodPool(t, testCtx.Scheduler.SchedulingQueue, scenario.schedulePod.podName) {
-								t.Fatalf("Expected the pod %s to be in the queue after the scheduling attempt", scenario.schedulePod.podName)
+								t.Fatalf("Expected the pod %s to be in the unschedulable queue after the scheduling attempt", scenario.schedulePod.podName)
 							}
 						}
+					case scenario.activatePod != "":
+						pod := unschedulablePod(t, testCtx.Scheduler.SchedulingQueue, scenario.activatePod)
+						if pod == nil {
+							t.Fatalf("Expected the pod %s to be in unschedulable queue before activation phase", scenario.activatePod)
+						}
+						m := map[string]*v1.Pod{scenario.activatePod: pod}
+						testCtx.Scheduler.SchedulingQueue.Activate(logger, m)
 					case scenario.completePreemption != "":
 						lock.Lock()
 						if _, ok := preemptionDoneChannels[scenario.completePreemption]; !ok {
@@ -974,6 +1453,20 @@ func TestAsyncPreemption(t *testing.T) {
 						}); err != nil {
 							t.Fatalf("Expected the pod %s to be running preemption", createdPods[*scenario.podRunningPreemption].Name)
 						}
+					case scenario.resumeBind:
+						blockBindingChannel <- struct{}{}
+					case scenario.verifyPodInUnschedulable != "":
+						if err := wait.PollUntilContextTimeout(testCtx.Ctx, 50*time.Millisecond, 200*time.Millisecond, false, func(ctx context.Context) (bool, error) {
+							if !podInUnschedulablePodPool(t, testCtx.Scheduler.SchedulingQueue, scenario.verifyPodInUnschedulable) {
+								return false, fmt.Errorf("expected the pod %s to remain in the unschedulable queue after the scheduling attempt", scenario.verifyPodInUnschedulable)
+							}
+							// Continue polling to confirm that pod remains in unschedulable queue and does not get activated.
+							return false, nil
+						}); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+							// If timeout was reached or context was cancelled without finding that vanished from unschedulable, it means the state is as expected.
+							// If a different error occurred, it means that the pod got unexpectedly activated, or something else went wrong.
+							t.Fatalf("Error in scenario verifyPodInUnschedulable: %v", err)
+						}
 					}
 				}
 			})
@@ -998,4 +1491,317 @@ func podInUnschedulablePodPool(t *testing.T, queue queue.SchedulingQueue, podNam
 		}
 	}
 	return false
+}
+
+// unschedulablePod checks if the given Pod is in the unschedulable queue and returns it.
+func unschedulablePod(t *testing.T, queue queue.SchedulingQueue, podName string) *v1.Pod {
+	t.Helper()
+	unschedPods := queue.UnschedulablePods()
+	for _, pod := range unschedPods {
+		if pod.Name == podName {
+			return pod
+		}
+	}
+	return nil
+}
+
+// blockingBindPlugin is a fake plugin that simulates a long binding operation.
+// Underneath it calls realPlugin.Bind(), after receiving a signal that binding can be unblocked.
+type blockingBindPlugin struct {
+	name                string
+	nameOfPodToBlock    string
+	realPlugin          fwk.BindPlugin
+	blockBindingChannel chan struct{}
+}
+
+func (bp *blockingBindPlugin) Name() string {
+	return bp.name
+}
+
+func (bp *blockingBindPlugin) Bind(ctx context.Context, state fwk.CycleState, p *v1.Pod, nodeName string) *fwk.Status {
+	if strings.Contains(p.Name, bp.nameOfPodToBlock) {
+		// block the bind goroutine to complete until the test case allows it to proceed.
+		select {
+		case <-bp.blockBindingChannel:
+		case <-ctx.Done():
+		}
+	}
+	return bp.realPlugin.Bind(ctx, state, p, nodeName)
+}
+
+var _ fwk.BindPlugin = &blockingBindPlugin{}
+
+// reservingPlugin is a fake plugin that reserves some resource in memory for nameOfPodToReserve pod.
+// Other pods won't be scheduled, unless the resources are unreserved.
+type reservingPlugin struct {
+	lock               sync.Mutex
+	name               string
+	nameOfPodToReserve string
+	reserved           bool
+}
+
+func (rp *reservingPlugin) Name() string {
+	return rp.name
+}
+
+func (rp *reservingPlugin) EventsToRegister(_ context.Context) ([]fwk.ClusterEventWithHint, error) {
+	return []fwk.ClusterEventWithHint{
+		// Plugin will wake up the pod on any Pod/Delete event.
+		{Event: fwk.ClusterEvent{Resource: fwk.Pod, ActionType: fwk.Delete}},
+	}, nil
+}
+
+const reservingPluginStateKey = "PreFilterReserving"
+
+type reservingPluginState struct {
+	reserved bool
+}
+
+func (s reservingPluginState) Clone() fwk.StateData {
+	return reservingPluginState{
+		reserved: s.reserved,
+	}
+}
+
+func (rp *reservingPlugin) PreFilter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodes []fwk.NodeInfo) (*fwk.PreFilterResult, *fwk.Status) {
+	rp.lock.Lock()
+	state.Write(reservingPluginStateKey, reservingPluginState{reserved: rp.reserved})
+	rp.lock.Unlock()
+	return nil, nil
+}
+
+func (rp *reservingPlugin) Filter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {
+	s, err := state.Read(reservingPluginStateKey)
+	if err != nil {
+		return fwk.AsStatus(err)
+	}
+	if s.(reservingPluginState).reserved {
+		return fwk.NewStatus(fwk.Unschedulable, "resources are reserved")
+	}
+	return nil
+}
+
+func (rp *reservingPlugin) Reserve(ctx context.Context, state fwk.CycleState, p *v1.Pod, nodeName string) *fwk.Status {
+	if strings.Contains(p.Name, rp.nameOfPodToReserve) {
+		rp.lock.Lock()
+		rp.reserved = true
+		rp.lock.Unlock()
+	}
+	return nil
+}
+
+func (rp *reservingPlugin) Unreserve(ctx context.Context, state fwk.CycleState, p *v1.Pod, nodeName string) {
+	if strings.Contains(p.Name, rp.nameOfPodToReserve) {
+		rp.lock.Lock()
+		rp.reserved = false
+		rp.lock.Unlock()
+	}
+}
+
+func (rp *reservingPlugin) PreFilterExtensions() fwk.PreFilterExtensions {
+	return rp
+}
+
+func (rp *reservingPlugin) AddPod(ctx context.Context, state fwk.CycleState, podToSchedule *v1.Pod, podInfoToAdd fwk.PodInfo, nodeInfo fwk.NodeInfo) *fwk.Status {
+	if strings.Contains(podInfoToAdd.GetPod().Name, rp.nameOfPodToReserve) {
+		state.Write(reservingPluginStateKey, reservingPluginState{reserved: true})
+	}
+	return nil
+}
+
+func (rp *reservingPlugin) RemovePod(ctx context.Context, state fwk.CycleState, podToSchedule *v1.Pod, podInfoToRemove fwk.PodInfo, nodeInfo fwk.NodeInfo) *fwk.Status {
+	if strings.Contains(podInfoToRemove.GetPod().Name, rp.nameOfPodToReserve) {
+		state.Write(reservingPluginStateKey, reservingPluginState{reserved: false})
+	}
+	return nil
+}
+
+var _ fwk.PreFilterPlugin = &reservingPlugin{}
+var _ fwk.FilterPlugin = &reservingPlugin{}
+var _ fwk.PreFilterExtensions = &reservingPlugin{}
+var _ fwk.ReservePlugin = &reservingPlugin{}
+
+type blockedPod struct {
+	blocked chan struct{}
+}
+
+// blockingPermitPlugin is a Permit plugin that blocks until a signal is received.
+type blockingPermitPlugin struct {
+	podsToBlock map[string]*blockedPod
+}
+
+const blockingPermitPluginName = "blocking-permit-plugin"
+
+var _ fwk.PermitPlugin = &blockingPermitPlugin{}
+
+func newBlockingPermitPlugin(_ context.Context, _ runtime.Object, h fwk.Handle) fwk.Plugin {
+	return &blockingPermitPlugin{
+		podsToBlock: make(map[string]*blockedPod),
+	}
+}
+
+func (pl *blockingPermitPlugin) Name() string {
+	return blockingPermitPluginName
+}
+
+func (pl *blockingPermitPlugin) Permit(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeName string) (*fwk.Status, time.Duration) {
+	if p, ok := pl.podsToBlock[pod.Name]; ok {
+		p.blocked <- struct{}{}
+		delete(pl.podsToBlock, pod.Name)
+		return fwk.NewStatus(fwk.Wait, "waiting"), time.Minute
+	}
+	return nil, 0
+}
+
+func TestPreemptionRespectsWaitingPod(t *testing.T) {
+	// 1. Create a "blocking" permit plugin that signals when it's running and waits for a specific close.
+	// 2. Create a big node on which low-priority pod will be scheduled.
+	// 3. Schedule a low-priority pod (victim) that hits this plugin (after being selected to run on a big node).
+	// 4. While victim is blocked in WaitOnPermit, add a smaller node on which the victim should be rescheduled.
+	// 5. Schedule a high-priority pod (preemptor), that can only fit on big node.
+	// 6. High-priority pod should be scheduled on a big node and victim should be preempted.
+	// 7. Victim should be rescheduled on a smaller node.
+
+	// Create a node with resources for only one pod.
+	nodeRes := map[v1.ResourceName]string{
+		v1.ResourceCPU:    "2",
+		v1.ResourceMemory: "2Gi",
+	}
+	node := st.MakeNode().Name("big-node").Capacity(nodeRes).Obj()
+
+	victim := st.MakePod().Name("victim").Priority(lowPriority).Req(map[v1.ResourceName]string{v1.ResourceCPU: "1", v1.ResourceMemory: "1Gi"}).Obj()
+	// Preemptor requires more resources than the small node has.
+	preemptor := st.MakePod().Name("preemptor").Priority(highPriority).Req(map[v1.ResourceName]string{v1.ResourceCPU: "1.5", v1.ResourceMemory: "1.5Gi"}).Obj()
+
+	// Register the blocking plugin
+	var plugin *blockingPermitPlugin
+	registry := make(frameworkruntime.Registry)
+	err := registry.Register(blockingPermitPluginName, func(ctx context.Context, obj runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
+		pl := newBlockingPermitPlugin(ctx, obj, fh)
+		plugin = pl.(*blockingPermitPlugin)
+		return pl, nil
+	})
+	if err != nil {
+		t.Fatalf("Error registering plugin: %v", err)
+	}
+
+	cfg := configtesting.V1ToInternalWithDefaults(t, configv1.KubeSchedulerConfiguration{
+		Profiles: []configv1.KubeSchedulerProfile{{
+			SchedulerName: ptr.To(v1.DefaultSchedulerName),
+			Plugins: &configv1.Plugins{
+				Permit: configv1.PluginSet{
+					Enabled: []configv1.Plugin{
+						{Name: blockingPermitPluginName},
+					},
+				},
+			},
+		}},
+	})
+
+	testCtx := testutils.InitTestSchedulerWithOptions(t,
+		testutils.InitTestAPIServer(t, "preemption-waiting", nil),
+		0,
+		scheduler.WithProfiles(cfg.Profiles...),
+		scheduler.WithFrameworkOutOfTreeRegistry(registry))
+	testutils.SyncSchedulerInformerFactory(testCtx)
+	go testCtx.Scheduler.Run(testCtx.Ctx)
+
+	victimToBlock := &blockedPod{
+		blocked: make(chan struct{}),
+	}
+	plugin.podsToBlock[victim.Name] = victimToBlock
+
+	cs := testCtx.ClientSet
+
+	if _, err := createNode(cs, node); err != nil {
+		t.Fatalf("Error creating node: %v", err)
+	}
+
+	t.Logf("Creating victim pod")
+	victim, err = cs.CoreV1().Pods(testCtx.NS.Name).Create(testCtx.Ctx, victim, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Error creating victim: %v", err)
+	}
+
+	t.Logf("Waiting for victim to reach WaitOnPermit")
+	select {
+	case <-victimToBlock.blocked:
+		t.Logf("Victim reached WaitOnPermit")
+	case <-time.After(wait.ForeverTestTimeout):
+		t.Fatalf("Timed out waiting for victim to reach WaitOnPermit")
+	}
+
+	smallNodeRes := map[v1.ResourceName]string{
+		v1.ResourceCPU:    "1",
+		v1.ResourceMemory: "1Gi",
+	}
+	smallNode := st.MakeNode().Name("small-node").Capacity(smallNodeRes).Obj()
+	if _, err := createNode(cs, smallNode); err != nil {
+		t.Fatalf("Error creating node: %v", err)
+	}
+
+	t.Logf("Creating preemptor pod")
+	_, err = cs.CoreV1().Pods(testCtx.NS.Name).Create(testCtx.Ctx, preemptor, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Error creating preemptor: %v", err)
+	}
+
+	// Preemptor should eventually be scheduled or cause victim preemption.
+	// Since victim is in WaitingOnPermit, Preemptor's preemption logic (PostFilter) should find it.
+	// It should call PreemptPod() on waiting victim.
+	// The plugin returns error on preemption, so the victim scheduling fails.
+	// The victim should NOT be deleted from API server.
+	// Instead the victim  should go to the backoff queue and get rescheduled eventually.
+	t.Logf("Waiting for preemptor to be scheduled")
+	err = wait.PollUntilContextTimeout(testCtx.Ctx, 100*time.Millisecond, 15*time.Second, false, func(ctx context.Context) (bool, error) {
+		// Ensure that victim is not deleted
+		_, err := cs.CoreV1().Pods(testCtx.NS.Name).Get(ctx, victim.Name, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("victim pod was deleted")
+			}
+			return false, err
+		}
+		// Check if preemptor was scheduled
+		p, err := cs.CoreV1().Pods(testCtx.NS.Name).Get(ctx, preemptor.Name, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("preemptor pod was deleted")
+			}
+			return false, err
+		}
+		return p.Spec.NodeName != "", nil
+	})
+	if err != nil {
+		t.Fatalf("Failed waiting for preemptor validation: %v", err)
+	}
+
+	t.Logf("waiting for victim to be rescheduled")
+	err = wait.PollUntilContextTimeout(testCtx.Ctx, 100*time.Millisecond, 15*time.Second, false, func(ctx context.Context) (bool, error) {
+		v, err := cs.CoreV1().Pods(testCtx.NS.Name).Get(ctx, victim.Name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		return v.Spec.NodeName != "", nil
+	})
+	if err != nil {
+		t.Fatalf("Failed waiting for victim validation: %v", err)
+	}
+
+	// Check that preemptor and victim are scheduled on expected nodes: victim on a small node and preemptor on a big node.
+	v, err := cs.CoreV1().Pods(testCtx.NS.Name).Get(testCtx.Ctx, victim.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Error getting victim: %v", err)
+	}
+	if v.Spec.NodeName != "small-node" {
+		t.Fatalf("Victim should be scheduled on small-node, but was scheduled on %s", v.Spec.NodeName)
+	}
+
+	p, err := cs.CoreV1().Pods(testCtx.NS.Name).Get(testCtx.Ctx, preemptor.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Error getting preemptor: %v", err)
+	}
+	if p.Spec.NodeName != "big-node" {
+		t.Fatalf("Preemptor should be scheduled on big-node, but was scheduled on %s", p.Spec.NodeName)
+	}
 }

@@ -51,6 +51,7 @@ import (
 	kubeschedulerconfigv1 "k8s.io/kube-scheduler/config/v1"
 	apiservertesting "k8s.io/kubernetes/cmd/kube-apiserver/app/testing"
 	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/kubernetes/pkg/scheduler"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 	kubeschedulerscheme "k8s.io/kubernetes/pkg/scheduler/apis/config/scheme"
 	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
@@ -91,7 +92,7 @@ func newDefaultComponentConfig() (*config.KubeSchedulerConfiguration, error) {
 // remove resources after finished.
 // Notes on rate limiter:
 //   - client rate limit is set to 5000.
-func mustSetupCluster(tCtx ktesting.TContext, config *config.KubeSchedulerConfiguration, enabledFeatures map[featuregate.Feature]bool, outOfTreePluginRegistry frameworkruntime.Registry) (informers.SharedInformerFactory, ktesting.TContext) {
+func mustSetupCluster(tCtx ktesting.TContext, config *config.KubeSchedulerConfiguration, enabledFeatures map[featuregate.Feature]bool, outOfTreePluginRegistry frameworkruntime.Registry) (*scheduler.Scheduler, informers.SharedInformerFactory, ktesting.TContext) {
 	var runtimeConfig []string
 	if enabledFeatures[features.DynamicResourceAllocation] {
 		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", resourceapi.SchemeGroupVersion))
@@ -135,7 +136,7 @@ func mustSetupCluster(tCtx ktesting.TContext, config *config.KubeSchedulerConfig
 
 	// Not all config options will be effective but only those mostly related with scheduler performance will
 	// be applied to start a scheduler, most of them are defined in `scheduler.schedulerOptions`.
-	_, informerFactory := util.StartScheduler(tCtx, config, outOfTreePluginRegistry)
+	scheduler, informerFactory := util.StartScheduler(tCtx, config, outOfTreePluginRegistry)
 	util.StartFakePVController(tCtx, tCtx.Client(), informerFactory)
 	runGC := util.CreateGCController(tCtx, tCtx, *cfg, informerFactory)
 	runNS := util.CreateNamespaceController(tCtx, tCtx, *cfg, informerFactory)
@@ -153,7 +154,7 @@ func mustSetupCluster(tCtx ktesting.TContext, config *config.KubeSchedulerConfig
 	go runNS()
 	go runResourceClaimController()
 
-	return informerFactory, tCtx
+	return scheduler, informerFactory, tCtx
 }
 
 func isAttempted(pod *v1.Pod) bool {
@@ -777,4 +778,39 @@ func (mc *memoryCollector) collect() []DataItem {
 		mc.createMetricDataItem(heapValues, "MB", "heap_memory_usage"),
 		growthItem,
 	}
+}
+
+// schedulingDurationCollector calculates the total duration of the scheduling phase, including pod creation.
+type schedulingDurationCollector struct {
+	resultLabels map[string]string
+	duration     time.Duration
+}
+
+func newSchedulingDurationCollector(resultLabels map[string]string) *schedulingDurationCollector {
+	return &schedulingDurationCollector{
+		resultLabels: resultLabels,
+	}
+}
+
+func (sdc *schedulingDurationCollector) init() error {
+	return nil
+}
+
+func (sdc *schedulingDurationCollector) run(tCtx ktesting.TContext) {
+	start := time.Now()
+	// Wait for the scheduling to finish
+	<-tCtx.Done()
+	sdc.duration = time.Since(start)
+}
+
+func (sdc *schedulingDurationCollector) collect() []DataItem {
+	labels := maps.Clone(sdc.resultLabels)
+	labels["Metric"] = "SchedulingDuration"
+	return []DataItem{{
+		Labels: labels,
+		Data: map[string]float64{
+			"Duration": sdc.duration.Seconds(),
+		},
+		Unit: "s",
+	}}
 }

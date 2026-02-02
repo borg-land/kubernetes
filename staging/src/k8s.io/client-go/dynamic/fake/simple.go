@@ -114,9 +114,13 @@ func NewSimpleDynamicClientWithCustomListKinds(scheme *runtime.Scheme, gvrToList
 	cs := &FakeDynamicClient{scheme: scheme, gvrToListKind: completeGVRToListKind, tracker: o}
 	cs.AddReactor("*", "*", testing.ObjectReaction(o))
 	cs.AddWatchReactor("*", func(action testing.Action) (handled bool, ret watch.Interface, err error) {
+		var opts metav1.ListOptions
+		if watchAction, ok := action.(testing.WatchActionImpl); ok {
+			opts = watchAction.ListOptions
+		}
 		gvr := action.GetResource()
 		ns := action.GetNamespace()
-		watch, err := o.Watch(gvr, ns)
+		watch, err := o.Watch(gvr, ns, opts)
 		if err != nil {
 			return false, nil, err
 		}
@@ -154,6 +158,10 @@ func (c *FakeDynamicClient) Tracker() testing.ObjectTracker {
 
 func (c *FakeDynamicClient) Resource(resource schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
 	return &dynamicResourceClient{client: c, resource: resource, listKind: c.gvrToListKind[resource]}
+}
+
+func (c *FakeDynamicClient) IsWatchListSemanticsUnSupported() bool {
+	return true
 }
 
 func (c *dynamicResourceClient) Namespace(ns string) dynamic.ResourceInterface {

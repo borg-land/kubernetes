@@ -68,7 +68,7 @@ type DryRun struct {
 // NewDryRun creates a new DryRun object that only has a fake client.
 func NewDryRun() *DryRun {
 	d := &DryRun{}
-	d.fakeClient = fake.NewSimpleClientset()
+	d.fakeClient = fake.NewClientset()
 	d.addReactors()
 	return d
 }
@@ -566,9 +566,6 @@ func getNode(name string) *corev1.Node {
 			Name: name,
 			Labels: map[string]string{
 				"kubernetes.io/hostname": name,
-			},
-			Annotations: map[string]string{
-				constants.AnnotationKubeadmCRISocket: "dry-run-cri-socket",
 			},
 		},
 	}

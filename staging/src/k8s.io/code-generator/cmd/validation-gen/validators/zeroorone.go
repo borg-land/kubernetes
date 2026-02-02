@@ -26,11 +26,31 @@ import (
 var zeroOrOneOfUnionValidator = types.Name{Package: libValidationPkg, Name: "ZeroOrOneOfUnion"}
 var zeroOrOneOfVariablePrefix = "zeroOrOneOfMembershipFor"
 
+// zeroOrOneOfDefinitions stores all zero-or-one-of union definitions found by tag validators.
+// Key is the struct path.
+var zeroOrOneOfDefinitions = map[string]unions{}
+
+// MarkZeroOrOneOfDeclarative marks the zero-or-one-of union containing the given member as declarative.
+func MarkZeroOrOneOfDeclarative(parentPath string, member *types.Member) {
+	us, ok := zeroOrOneOfDefinitions[parentPath]
+	if !ok {
+		return
+	}
+	for _, u := range us {
+		// Check field members
+		for _, m := range u.fieldMembers {
+			if m == member {
+				u.isDeclarative = true
+			}
+		}
+	}
+}
+
 func init() {
 	// ZeroOrOneOf unions are comprised of multiple tags, which need to share information
 	// between them.  The tags are on struct fields, but the validation
 	// actually pertains to the struct itself.
-	shared := map[string]unions{}
+	shared := zeroOrOneOfDefinitions
 	RegisterTypeValidator(zeroOrOneOfTypeOrFieldValidator{shared})
 	RegisterFieldValidator(zeroOrOneOfTypeOrFieldValidator{shared})
 	RegisterTagValidator(zeroOrOneOfMemberTagValidator{shared})
@@ -65,6 +85,11 @@ func (ztfv zeroOrOneOfTypeOrFieldValidator) GetValidations(context Context) (Val
 }
 
 const (
+	// This tag should only ever be used on list item types, never on struct
+	// fields directly.  If applied to struct fields, the "orR one of" behavior
+	// is frozen at this moment in time, and can never be expanded. Why?
+	// Back-rev clients can't tell the difference between "zero were specified"
+	// and "a field I don't know about was specified".
 	zeroOrOneOfMemberTagName = "k8s:zeroOrOneOfMember"
 )
 
@@ -94,10 +119,12 @@ func (zmtv zeroOrOneOfMemberTagValidator) GetValidations(context Context, tag co
 
 func (zmtv zeroOrOneOfMemberTagValidator) Docs() TagDoc {
 	return TagDoc{
-		Tag:         zmtv.TagName(),
-		Scopes:      zmtv.ValidScopes().UnsortedList(),
-		Description: "Indicates that this field is a member of a zero-or-one-of union.",
-		Docs:        "A zero-or-one-of union allows at most one member to be set. Unlike regular unions, having no members set is valid.",
+		Tag:            zmtv.TagName(),
+		Scopes:         zmtv.ValidScopes().UnsortedList(),
+		StabilityLevel: Stable,
+		Description:    "Indicates that this field is a member of a zero-or-one-of union.",
+		Docs:           "A zero-or-one-of union allows at most one member to be set. Unlike regular unions, having no members set is valid.",
+		Warning:        "This tag should only be used on sets of list items, and never on struct fields directly.",
 		Args: []TagArgDoc{{
 			Name:        "union",
 			Description: "<string>",

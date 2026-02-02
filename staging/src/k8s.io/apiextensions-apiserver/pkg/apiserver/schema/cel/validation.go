@@ -95,7 +95,7 @@ func NewValidator(s *schema.Structural, isResourceRoot bool, perCallLimit uint64
 func validator(validationSchema, nodeSchema *schema.Structural, isResourceRoot bool, declType *cel.DeclType, perCallLimit uint64) *Validator {
 	compilationSchema := *nodeSchema
 	compilationSchema.XValidations = validationSchema.XValidations
-	compiledRules, err := Compile(&compilationSchema, declType, perCallLimit, environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion(), true), StoredExpressionsEnvLoader())
+	compiledRules, err := Compile(&compilationSchema, declType, perCallLimit, environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion()), StoredExpressionsEnvLoader())
 
 	var itemsValidator, additionalPropertiesValidator *Validator
 	var propertiesValidators map[string]Validator
@@ -494,10 +494,8 @@ func (s *Validator) validateExpressions(ctx context.Context, fldPath *field.Path
 		}
 
 		value := obj
-		if ok {
+		if sts.Type == "object" || sts.Type == "array" {
 			value = field.OmitValueType{}
-		} else if sts.Type == "object" || sts.Type == "array" {
-			value = sts.Type
 		}
 
 		addErr(fieldErrorForReason(currentFldPath, value, detail, rule.Reason))

@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/validate/content"
 	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
-	pathvalidation "k8s.io/apimachinery/pkg/api/validation/path"
 	unversionedvalidation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -605,7 +605,7 @@ func validateIngressTypedLocalObjectReference(params *api.TypedLocalObjectRefere
 	if params.Kind == "" {
 		allErrs = append(allErrs, field.Required(fldPath.Child("kind"), ""))
 	} else {
-		for _, msg := range pathvalidation.IsValidPathSegmentName(params.Kind) {
+		for _, msg := range content.IsPathSegmentName(params.Kind) {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("kind"), params.Kind, msg))
 		}
 	}
@@ -613,7 +613,7 @@ func validateIngressTypedLocalObjectReference(params *api.TypedLocalObjectRefere
 	if params.Name == "" {
 		allErrs = append(allErrs, field.Required(fldPath.Child("name"), ""))
 	} else {
-		for _, msg := range pathvalidation.IsValidPathSegmentName(params.Name) {
+		for _, msg := range content.IsPathSegmentName(params.Name) {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("name"), params.Name, msg))
 		}
 	}
@@ -632,11 +632,27 @@ func validateIngressClassParametersReference(params *networking.IngressClassPara
 		return allErrs
 	}
 
-	allErrs = append(allErrs, validateIngressTypedLocalObjectReference(&api.TypedLocalObjectReference{
-		APIGroup: params.APIGroup,
-		Kind:     params.Kind,
-		Name:     params.Name,
-	}, fldPath)...)
+	if params.APIGroup != nil {
+		for _, msg := range validation.IsDNS1123Subdomain(*params.APIGroup) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("apiGroup"), *params.APIGroup, msg))
+		}
+	}
+
+	if params.Kind == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("kind"), "")).MarkCoveredByDeclarative()
+	} else {
+		for _, msg := range content.IsPathSegmentName(params.Kind) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("kind"), params.Kind, msg))
+		}
+	}
+
+	if params.Name == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("name"), "")).MarkCoveredByDeclarative()
+	} else {
+		for _, msg := range content.IsPathSegmentName(params.Name) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("name"), params.Name, msg))
+		}
+	}
 
 	if params.Scope == nil {
 		allErrs = append(allErrs, field.Required(fldPath.Child("scope"), ""))
@@ -707,7 +723,20 @@ func allowRelaxedServiceNameValidation(oldIngress *networking.Ingress) bool {
 	if oldIngress == nil {
 		return false
 	}
-	// If feature gate is disabled, check if any service names in the old Ingresss
+
+	// Check if default backend service names in the old Ingress
+	if oldIngress.Spec.DefaultBackend != nil && oldIngress.Spec.DefaultBackend.Service != nil {
+		serviceName := oldIngress.Spec.DefaultBackend.Service.Name
+		// If a name doesn't validate with apimachineryvalidation.NameIsDNS1035Label, but does validate with apimachineryvalidation.NameIsDNSLabel,
+		// then we allow it to be used as a Service name in an Ingress.
+		dnsLabelValidationErrors := apimachineryvalidation.NameIsDNSLabel(serviceName, false)
+		dns1035LabelValidationErrors := apimachineryvalidation.NameIsDNS1035Label(serviceName, false)
+		if len(dnsLabelValidationErrors) == 0 && len(dns1035LabelValidationErrors) > 0 {
+			return true
+		}
+	}
+
+	// If feature gate is disabled, check if any service names in the old Ingress
 	for _, rule := range oldIngress.Spec.Rules {
 		if rule.HTTP == nil {
 			continue
@@ -772,7 +801,7 @@ func validateIPAddressParentReference(params *networking.ParentReference, fldPat
 	if params.Resource == "" {
 		allErrs = append(allErrs, field.Required(fldPath.Child("resource"), ""))
 	} else {
-		for _, msg := range pathvalidation.IsValidPathSegmentName(params.Resource) {
+		for _, msg := range content.IsPathSegmentName(params.Resource) {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("resource"), params.Resource, msg))
 		}
 	}
@@ -781,14 +810,14 @@ func validateIPAddressParentReference(params *networking.ParentReference, fldPat
 	if params.Name == "" {
 		allErrs = append(allErrs, field.Required(fldPath.Child("name"), ""))
 	} else {
-		for _, msg := range pathvalidation.IsValidPathSegmentName(params.Name) {
+		for _, msg := range content.IsPathSegmentName(params.Name) {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("name"), params.Name, msg))
 		}
 	}
 
 	// namespace is optional
 	if params.Namespace != "" {
-		for _, msg := range pathvalidation.IsValidPathSegmentName(params.Namespace) {
+		for _, msg := range content.IsPathSegmentName(params.Namespace) {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("namespace"), params.Namespace, msg))
 		}
 	}

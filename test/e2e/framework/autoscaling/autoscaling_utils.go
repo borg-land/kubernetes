@@ -40,6 +40,7 @@ import (
 	scaleclient "k8s.io/client-go/scale"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2edebug "k8s.io/kubernetes/test/e2e/framework/debug"
+	e2eendpointslice "k8s.io/kubernetes/test/e2e/framework/endpointslice"
 	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	e2erc "k8s.io/kubernetes/test/e2e/framework/rc"
 	e2eresource "k8s.io/kubernetes/test/e2e/framework/resource"
@@ -59,11 +60,10 @@ const (
 	dynamicRequestSizeInMegabytes   = 100
 	dynamicRequestSizeCustomMetric  = 10
 	port                            = 80
+	portName                        = "http"
 	targetPort                      = 8080
 	sidecarTargetPort               = 8081
 	timeoutRC                       = 120 * time.Second
-	startServiceTimeout             = time.Minute
-	startServiceInterval            = 5 * time.Second
 	invalidKind                     = "ERROR: invalid workload kind for resource consumer"
 	customMetricName                = "QPS"
 	serviceInitializationTimeout    = 2 * time.Minute
@@ -114,6 +114,7 @@ type ResourceConsumer struct {
 	dynamicClient            dynamic.Interface
 	resourceClient           dynamic.ResourceInterface
 	scaleClient              scaleclient.ScalesGetter
+	customMetricName         string
 	cpu                      chan int
 	mem                      chan int
 	customMetric             chan int
@@ -132,7 +133,7 @@ type ResourceConsumer struct {
 
 // NewDynamicResourceConsumer is a wrapper to create a new dynamic ResourceConsumer
 func NewDynamicResourceConsumer(ctx context.Context, name, nsName string, kind schema.GroupVersionKind, replicas, initCPUTotal, initMemoryTotal, initCustomMetric int, cpuLimit, memLimit int64, clientset clientset.Interface, scaleClient scaleclient.ScalesGetter, enableSidecar SidecarStatusType, sidecarType SidecarWorkloadType, podResources *v1.ResourceRequirements) *ResourceConsumer {
-	return newResourceConsumer(ctx, name, nsName, kind, replicas, initCPUTotal, initMemoryTotal, initCustomMetric, dynamicConsumptionTimeInSeconds,
+	return NewResourceConsumer(ctx, name, nsName, kind, replicas, customMetricName, initCPUTotal, initMemoryTotal, initCustomMetric, dynamicConsumptionTimeInSeconds,
 		dynamicRequestSizeInMillicores, dynamicRequestSizeInMegabytes, dynamicRequestSizeCustomMetric, cpuLimit, memLimit, clientset, scaleClient, nil, nil, enableSidecar, sidecarType, podResources)
 }
 
@@ -170,7 +171,7 @@ initMemoryTotal argument is in megabytes
 memLimit argument is in megabytes, memLimit is a maximum amount of memory that can be consumed by a single pod
 cpuLimit argument is in millicores, cpuLimit is a maximum amount of cpu that can be consumed by a single pod
 */
-func newResourceConsumer(ctx context.Context, name, nsName string, kind schema.GroupVersionKind, replicas, initCPUTotal, initMemoryTotal, initCustomMetric, consumptionTimeInSeconds, requestSizeInMillicores,
+func NewResourceConsumer(ctx context.Context, name, nsName string, kind schema.GroupVersionKind, replicas int, customMetricName string, initCPUTotal, initMemoryTotal, initCustomMetric, consumptionTimeInSeconds, requestSizeInMillicores,
 	requestSizeInMegabytes int, requestSizeCustomMetric int, cpuLimit, memLimit int64, clientset clientset.Interface, scaleClient scaleclient.ScalesGetter, podAnnotations, serviceAnnotations map[string]string, sidecarStatus SidecarStatusType, sidecarType SidecarWorkloadType, podResources *v1.ResourceRequirements) *ResourceConsumer {
 	if podAnnotations == nil {
 		podAnnotations = make(map[string]string)
@@ -212,6 +213,7 @@ func newResourceConsumer(ctx context.Context, name, nsName string, kind schema.G
 		scaleClient:              scaleClient,
 		resourceClient:           resourceClient,
 		dynamicClient:            dynamicClient,
+		customMetricName:         customMetricName,
 		cpu:                      make(chan int),
 		mem:                      make(chan int),
 		customMetric:             make(chan int),
@@ -324,13 +326,13 @@ func (rc *ResourceConsumer) makeConsumeCustomMetric(ctx context.Context) {
 		select {
 		case delta = <-rc.customMetric:
 			if delta != 0 {
-				framework.Logf("RC %s: setting bump of metric %s to %d in total", rc.name, customMetricName, delta)
+				framework.Logf("RC %s: setting bump of metric %s to %d in total", rc.name, rc.customMetricName, delta)
 			} else {
-				framework.Logf("RC %s: disabling consumption of custom metric %s", rc.name, customMetricName)
+				framework.Logf("RC %s: disabling consumption of custom metric %s", rc.name, rc.customMetricName)
 			}
 		case <-tick:
 			if delta != 0 {
-				framework.Logf("RC %s: sending request to consume %d of custom metric %s", rc.name, delta, customMetricName)
+				framework.Logf("RC %s: sending request to consume %d of custom metric %s", rc.name, delta, rc.customMetricName)
 				rc.sendConsumeCustomMetric(ctx, delta)
 			}
 			tick = time.After(rc.sleepTime)
@@ -351,7 +353,7 @@ func (rc *ResourceConsumer) sendConsumeCPURequest(ctx context.Context, millicore
 			return err
 		}
 		req := proxyRequest.Namespace(rc.nsName).
-			Name(rc.controllerName).
+			Name(fmt.Sprintf("%s:%s", rc.controllerName, portName)).
 			Suffix("ConsumeCPU").
 			Param("millicores", strconv.Itoa(millicores)).
 			Param("durationSec", strconv.Itoa(rc.consumptionTimeInSeconds)).
@@ -382,7 +384,7 @@ func (rc *ResourceConsumer) sendConsumeMemRequest(ctx context.Context, megabytes
 			return err
 		}
 		req := proxyRequest.Namespace(rc.nsName).
-			Name(rc.controllerName).
+			Name(fmt.Sprintf("%s:%s", rc.controllerName, portName)).
 			Suffix("ConsumeMem").
 			Param("megabytes", strconv.Itoa(megabytes)).
 			Param("durationSec", strconv.Itoa(rc.consumptionTimeInSeconds)).
@@ -413,9 +415,9 @@ func (rc *ResourceConsumer) sendConsumeCustomMetric(ctx context.Context, delta i
 			return err
 		}
 		req := proxyRequest.Namespace(rc.nsName).
-			Name(rc.controllerName).
+			Name(fmt.Sprintf("%s:%s", rc.controllerName, portName)).
 			Suffix("BumpMetric").
-			Param("metric", customMetricName).
+			Param("metric", rc.customMetricName).
 			Param("delta", strconv.Itoa(delta)).
 			Param("durationSec", strconv.Itoa(rc.consumptionTimeInSeconds)).
 			Param("requestSizeMetrics", strconv.Itoa(rc.requestSizeCustomMetric))
@@ -572,9 +574,11 @@ func createService(ctx context.Context, c clientset.Interface, name, ns string, 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Annotations: annotations,
+			Labels:      map[string]string{"name": name},
 		},
 		Spec: v1.ServiceSpec{
 			Ports: []v1.ServicePort{{
+				Name:       portName,
 				Port:       port,
 				TargetPort: intstr.FromInt32(int32(targetPort)),
 			}},
@@ -613,8 +617,8 @@ func runServiceAndSidecarForResourceConsumer(ctx context.Context, c clientset.In
 
 	framework.ExpectNoError(e2erc.RunRC(ctx, controllerRcConfig))
 	// Wait for endpoints to propagate for the controller service.
-	framework.ExpectNoError(framework.WaitForServiceEndpointsNum(
-		ctx, c, ns, controllerName, 1, startServiceInterval, startServiceTimeout))
+	framework.ExpectNoError(e2eendpointslice.WaitForEndpointCount(
+		ctx, c, ns, controllerName, 1))
 }
 
 func runServiceAndWorkloadForResourceConsumer(ctx context.Context, c clientset.Interface, resourceClient dynamic.ResourceInterface, apiExtensionClient crdclientset.Interface, ns, name string, kind schema.GroupVersionKind, replicas int, cpuLimitMillis, memLimitMb int64, podAnnotations, serviceAnnotations map[string]string, additionalContainers []v1.Container, podResources *v1.ResourceRequirements) {
@@ -699,8 +703,8 @@ func runServiceAndWorkloadForResourceConsumer(ctx context.Context, c clientset.I
 
 	framework.ExpectNoError(e2erc.RunRC(ctx, controllerRcConfig))
 	// Wait for endpoints to propagate for the controller service.
-	framework.ExpectNoError(framework.WaitForServiceEndpointsNum(
-		ctx, c, ns, controllerName, 1, startServiceInterval, startServiceTimeout))
+	framework.ExpectNoError(e2eendpointslice.WaitForEndpointCount(
+		ctx, c, ns, controllerName, 1))
 }
 
 func CreateHorizontalPodAutoscaler(ctx context.Context, rc *ResourceConsumer, targetRef autoscalingv2.CrossVersionObjectReference, namespace string, metrics []autoscalingv2.MetricSpec, resourceType v1.ResourceName, metricTargetType autoscalingv2.MetricTargetType, metricTargetValue, minReplicas, maxReplicas int32) *autoscalingv2.HorizontalPodAutoscaler {

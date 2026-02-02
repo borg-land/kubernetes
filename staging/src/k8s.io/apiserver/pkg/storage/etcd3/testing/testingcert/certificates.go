@@ -16,17 +16,12 @@ limitations under the License.
 
 package testingcert
 
-// You can use cfssl tool to generate certificates, please refer
-// https://github.com/etcd-io/etcd/tree/main/hack/tls-setup for more details.
+// You can use step cli tool to generate certificates, please refer
+// https://github.com/smallstep/cli for more details.
 //
-// ca-config.json:
-//
-//	expiry was changed from 1 year to 100 years (876000h)
-//
-// ca-csr.json:
-//
-//	ca expiry was set to 100 years (876000h) ("ca":{"expiry":"876000h"})
-//	key was changed from ecdsa,384 to rsa,2048
+// Example commands:
+//   step certificate create "CA" ca.pem ca-key.pem --profile root-ca --not-after=876000h --no-password --insecure
+//   step certificate create "Server" server.pem server-key.pem --ca ca.pem --ca-key ca-key.pem --not-after=876000h --no-password --insecure --san localhost --san 127.0.0.1 --kty RSA --size 2048
 //
 // req-csr.json:
 //

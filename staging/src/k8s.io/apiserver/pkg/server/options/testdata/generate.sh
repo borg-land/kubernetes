@@ -14,11 +14,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-cfssl gencert -initca root.csr.json | cfssljson -bare root
+# Generate root CA
+step certificate create "Root-CA" root.pem root-key.pem \
+    --profile root-ca \
+    --no-password --insecure --force \
+    --not-after=876000h
 
-cfssl gencert -initca intermediate.csr.json | cfssljson -bare intermediate
-cfssl sign -ca root.pem -ca-key root-key.pem -config intermediate.config.json intermediate.csr | cfssljson -bare intermediate
+# Generate intermediate CA
+step certificate create "Intermediate-CA" intermediate.pem intermediate-key.pem \
+    --profile intermediate-ca \
+    --ca root.pem --ca-key root-key.pem \
+    --no-password --insecure --force \
+    --not-after=876000h
 
-cfssl gencert -ca intermediate.pem -ca-key intermediate-key.pem -config client.config.json --profile=valid   client.csr.json | cfssljson -bare client-valid
-cfssl gencert -ca intermediate.pem -ca-key intermediate-key.pem -config client.config.json --profile=expired client.csr.json | cfssljson -bare client-expired
+# Generate valid client certificate
+step certificate create "My Client" client-valid.pem client-valid-key.pem \
+    --ca intermediate.pem --ca-key intermediate-key.pem \
+    --no-password --insecure --force \
+    --not-after=876000h
+
+# Generate expired client certificate
+step certificate create "My Client" client-expired.pem client-expired-key.pem \
+    --ca intermediate.pem --ca-key intermediate-key.pem \
+    --no-password --insecure --force \
+    --not-before="1990-12-31T23:59:00Z" \
+    --not-after="1990-12-31T23:59:00Z"
 

@@ -371,7 +371,7 @@ function find-release-tars() {
   fi
 }
 
-# Run the cfssl command to generates certificate files for etcd service, the
+# Run the step command to generate certificate files for etcd service, the
 # certificate files will save in $1 directory.
 #
 # Optional vars:
@@ -398,66 +398,7 @@ function generate-etcd-cert() {
   mkdir -p "${cert_dir}"
   pushd "${cert_dir}"
 
-  kube::util::ensure-cfssl .
-
-  if [ ! -r "ca-config.json" ]; then
-    cat >ca-config.json <<EOF
-{
-    "signing": {
-        "default": {
-            "expiry": "43800h"
-        },
-        "profiles": {
-            "server": {
-                "expiry": "43800h",
-                "usages": [
-                    "signing",
-                    "key encipherment",
-                    "server auth",
-                    "client auth"
-                ]
-            },
-            "client": {
-                "expiry": "43800h",
-                "usages": [
-                    "signing",
-                    "key encipherment",
-                    "client auth"
-                ]
-            },
-            "peer": {
-                "expiry": "43800h",
-                "usages": [
-                    "signing",
-                    "key encipherment",
-                    "server auth",
-                    "client auth"
-                ]
-            }
-        }
-    }
-}
-EOF
-  fi
-
-  if [ ! -r "ca-csr.json" ]; then
-    cat >ca-csr.json <<EOF
-{
-    "CN": "Kubernetes",
-    "key": {
-        "algo": "ecdsa",
-        "size": 256
-    },
-    "names": [
-        {
-            "C": "US",
-            "L": "CA",
-            "O": "kubernetes.io"
-        }
-    ]
-}
-EOF
-  fi
+  kube::util::ensure-step .
 
   if [[ -n "${GEN_ETCD_CA_CERT}" && -n "${GEN_ETCD_CA_KEY}" ]]; then
     # ca_cert and ca_key are optional external vars supplied in cluster/gce/util.sh,
@@ -469,27 +410,40 @@ EOF
   fi
 
   if [[ ! -r "ca.pem" || ! -r "ca-key.pem" ]]; then
-    ${CFSSL_BIN} gencert -initca ca-csr.json | ${CFSSLJSON_BIN} -bare ca -
+    ${STEP_BIN} certificate create "Kubernetes" ca.pem ca-key.pem \
+        --profile root-ca \
+        --no-password --insecure --force \
+        --not-after=43800h \
+        --kty EC --curve P-256
   fi
 
   case "${type_cert}" in
     client)
       echo "Generate client certificates..."
-      echo '{"CN":"client","hosts":["*"],"key":{"algo":"ecdsa","size":256}}' \
-       | ${CFSSL_BIN} gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=client - \
-       | ${CFSSLJSON_BIN} -bare "${prefix}"
+      ${STEP_BIN} certificate create "client" "${prefix}.pem" "${prefix}-key.pem" \
+          --ca=ca.pem --ca-key=ca-key.pem \
+          --no-password --insecure --force \
+          --not-after=43800h \
+          --kty EC --curve P-256 \
+          --san "*"
       ;;
     server)
       echo "Generate server certificates..."
-      echo '{"CN":"'"${member_ip}"'","hosts":[],"key":{"algo":"ecdsa","size":256}}' \
-       | ${CFSSL_BIN} gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=server -hostname="${member_ip},127.0.0.1" - \
-       | ${CFSSLJSON_BIN} -bare "${prefix}"
+      ${STEP_BIN} certificate create "${member_ip}" "${prefix}.pem" "${prefix}-key.pem" \
+          --ca=ca.pem --ca-key=ca-key.pem \
+          --no-password --insecure --force \
+          --not-after=43800h \
+          --kty EC --curve P-256 \
+          --san "${member_ip}" --san "127.0.0.1"
       ;;
     peer)
       echo "Generate peer certificates..."
-      echo '{"CN":"'"${member_ip}"'","hosts":[],"key":{"algo":"ecdsa","size":256}}' \
-       | ${CFSSL_BIN} gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=peer -hostname="${member_ip},127.0.0.1" - \
-       | ${CFSSLJSON_BIN} -bare "${prefix}"
+      ${STEP_BIN} certificate create "${member_ip}" "${prefix}.pem" "${prefix}-key.pem" \
+          --ca=ca.pem --ca-key=ca-key.pem \
+          --no-password --insecure --force \
+          --not-after=43800h \
+          --kty EC --curve P-256 \
+          --san "${member_ip}" --san "127.0.0.1"
       ;;
     *)
       echo "Unknow, unsupported etcd certs type: ${type_cert}" >&2
